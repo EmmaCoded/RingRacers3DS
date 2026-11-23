@@ -1,0 +1,27 @@
+# Sprite prefixes that go into the ATLAS of common objects.
+# One per line. Only sprites between 8 and 128 pixels per side are accepted.
+# Only what appears in EVERY race goes in -> about 2 fixed sheets (512 KB of VRAM). Entries marked "excluded" stay loose.
+# Add direction arrows or others here once you know their names.
+RING   # rings
+RNDM   # item box
+RBOX   # ring box
+# (excluded: large or rare) SBOX   # orb box (Battle)
+# (excluded: large or rare) IMON   # item monitor
+ITEM   # item icons
+ITMO
+BANA   # banana
+# (excluded: large or rare) ORBN   # orbinaut
+# (excluded: large or rare) JAWZ   # jawz
+SSMN   # mine
+# (excluded: large or rare) BHOG   # ballhog
+# (excluded: large or rare) SPBM   # SPB
+SINK   # kitchen sink
+GRWP   # grow
+FAST   # speed trail
+# (excluded: large or rare) BOST   # sneaker flame
+DUST   # dust
+SPRK   # sparks
+BUMP   # bump
+SPLH   # splash
+WAYP   # waypoint
+# (excluded: large or rare) DEZL   # DEZ laser

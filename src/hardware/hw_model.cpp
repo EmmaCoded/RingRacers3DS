@@ -28,6 +28,10 @@
 #include "u_list.h"
 #include <string.h>
 
+// with Mesa's OpenGL (DX12/Vulkan) .md3 files are loaded as floats: D3D12 has no
+// 3-short/3-byte vertex formats and Mesa converted on every draw by reading the VBO (~50 ms/frame).
+boolean rr_gl_floatmodels = false;
+
 static float PI = (3.1415926535897932384626433832795f);
 static float U_Deg2Rad(float deg)
 {
@@ -179,7 +183,7 @@ model_t *LoadModel(const char *filename, int ztag)
 
 	if (!strcmp(extension, ".md3"))
 	{
-		if (!(model = MD3_LoadModel(filename, ztag, false)))
+		if (!(model = MD3_LoadModel(filename, ztag, rr_gl_floatmodels)))
 			return NULL;
 	}
 	else if (!strcmp(extension, ".md3s")) // MD3 that will be converted in memory to use full floats
@@ -245,6 +249,9 @@ model_t *LoadModel(const char *filename, int ztag)
 
 void HWR_ReloadModels(void)
 {
+#ifdef __3DS__ // 3DS without 3D models
+	return;
+#else
 	size_t i;
 	INT32 s;
 
@@ -259,6 +266,7 @@ void HWR_ReloadModels(void)
 		if (md2_models[i].model)
 			LoadModelInterpolationSettings(md2_models[i].model);
 	}
+#endif
 }
 
 void LoadModelInterpolationSettings(model_t *model)

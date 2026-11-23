@@ -168,7 +168,27 @@ void *Picture_PatchConvert(
 	size_t maxoutsize = maxcolumnsize * inwidth + (8 + 4 * inwidth);
 	// so, a 512x512 flat should maximally need 393,760 (384.53 KiB) bytes.
 	// quite a bit smaller than 64 megabytes, and much less annoying to the windows debug allocator!
+#ifdef __3DS__
+	// (MK7 style): fixed, reusable temporary buffer. Before, each
+	// conversion requested up to ~400 KB contiguous from the fragmented heap -> crash
+	// "Out of memory 214664 bytes (r_picformats.c:171)" in Balconies.
+	{
+		static UINT8 *s_stage = NULL;
+		static size_t s_stagesize = 0;
+		if (maxoutsize > s_stagesize)
+		{
+			size_t want = maxoutsize < 400u*1024u ? 400u*1024u : maxoutsize;
+			free(s_stage);
+			s_stage = (UINT8 *)malloc(want);
+			if (!s_stage) { Z_FreeTags(PU_PURGELEVEL, INT32_MAX); s_stage = (UINT8 *)malloc(want); }
+			if (!s_stage) I_Error("Picture_PatchConvert: out of memory for the buffer (%s bytes)", sizeu1(want));
+			s_stagesize = want;
+		}
+		imgbuf = s_stage;
+	}
+#else
 	imgbuf = Z_Malloc(maxoutsize, PU_STATIC, NULL);
+#endif
 	imgptr = imgbuf;
 
 	// Write image size and offset
@@ -362,7 +382,9 @@ void *Picture_PatchConvert(
 	size = imgptr-imgbuf;
 	img = Z_Malloc(size, PU_STATIC, NULL);
 	memcpy(img, imgbuf, size);
+#ifndef __3DS__
 	Z_Free(imgbuf);
+#endif
 
 	if (Picture_IsInternalPatchFormat(outformat))
 	{
@@ -1460,7 +1482,6 @@ static void R_ParseSpriteInfoSkin(struct ParseSpriteInfoState *parser)
 static void copy_to_skin (struct ParseSpriteInfoState *parser, INT32 skinnum)
 {
 	skin_t *skin = skins[skinnum];
-	spriteinfo_t *sprinfo = skin->sprinfo;
 
 	if (parser->any)
 	{
@@ -1468,12 +1489,16 @@ static void copy_to_skin (struct ParseSpriteInfoState *parser, INT32 skinnum)
 
 		for (spr2num = 0; spr2num < NUMPLAYERSPRITES; ++spr2num)
 		{
-			M_Memcpy(&sprinfo[spr2num], parser->info, sizeof(spriteinfo_t));
+			if (!skin->sprinfo[spr2num])
+				skin->sprinfo[spr2num] = Z_Calloc(sizeof(spriteinfo_t), PU_STATIC, NULL);
+			M_Memcpy(skin->sprinfo[spr2num], parser->info, sizeof(spriteinfo_t));
 		}
 	}
 	else
 	{
-		M_Memcpy(&sprinfo[parser->spr2num], parser->info, sizeof(spriteinfo_t));
+		if (!skin->sprinfo[parser->spr2num])
+			skin->sprinfo[parser->spr2num] = Z_Calloc(sizeof(spriteinfo_t), PU_STATIC, NULL);
+		M_Memcpy(skin->sprinfo[parser->spr2num], parser->info, sizeof(spriteinfo_t));
 	}
 }
 

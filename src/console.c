@@ -1906,8 +1906,13 @@ void CON_Drawer(void)
 
 	if (con_curlines > 0)
 		CON_DrawConsole();
+#ifdef __3DS__
+	// 3DS: messages go to the bottom screen panel (i_video_3ds.c)
+	// and to the log; the game screen stays clean.
+#else
 	else if (CON_GamestateDrawHudLines() == true)
 		CON_DrawHudlines();
+#endif
 
 	Unlock_state();
 }
@@ -1949,6 +1954,14 @@ void CON_SetLoadingProgress(con_loadprogress_t newStep)
 
 	if (con_startup_loadprogress <= LOADED_ALLDONE)
 		CONS_Printf("LOADING UPDATE - %s\n", CON_LoadingStrings[con_startup_loadprogress]);
+#ifdef __3DS__
+	{
+		// Memory at each loading step, to find the ~45 MB that live outside the zone
+		extern void Z_3DS_ReportTags(const char *why);
+		if (con_startup_loadprogress <= LOADED_ALLDONE)
+			Z_3DS_ReportTags(CON_LoadingStrings[con_startup_loadprogress]);
+	}
+#endif
 
 	if (con_startup_loadprogress < LOADED_ISTARTUPGRAPHICS) // rendering not possible?
 		return;

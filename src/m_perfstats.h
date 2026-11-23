@@ -70,6 +70,22 @@ void PS_ResetBotInfo(void);
 
 void M_DrawPerfStats(void);
 
+
+/* HW renderer perf stats -- defined in hw_stats_stub.c when HWRENDER is off */
+extern precise_t ps_hw_skyboxtime;
+extern precise_t ps_hw_nodesorttime;
+extern precise_t ps_hw_nodedrawtime;
+extern precise_t ps_hw_spritesorttime;
+extern precise_t ps_hw_spritedrawtime;
+extern precise_t ps_hw_batchsorttime;
+extern precise_t ps_hw_batchdrawtime;
+extern int ps_hw_numpolys;
+extern int ps_hw_numverts;
+extern int ps_hw_numcalls;
+extern int ps_hw_numshaders;
+extern int ps_hw_numtextures;
+extern int ps_hw_numpolyflags;
+extern int ps_hw_numcolors;
 #ifdef __cplusplus
 } // extern "C"
 #endif

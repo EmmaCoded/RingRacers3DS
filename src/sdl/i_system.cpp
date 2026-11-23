@@ -292,7 +292,7 @@ static void I_ShowErrorMessageBox(const char *messagefordevelopers, boolean dump
 	static char finalmessage[2048];
 	size_t firstimpressionsline = 3; // "Dr Robotnik's Ring Racers" has encountered...
 
-	if (M_CheckParm("-dedicated"))
+	if (M_CheckParm("-dedicated") || M_CheckParm("-nomsgbox"))
 		return;
 
 	snprintf(
@@ -371,7 +371,7 @@ static void I_ShowErrorMessageBox(const char *messagefordevelopers, boolean dump
 	// which should fail gracefully if it can't put a message box up
 	// on the target system
 	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-		"Dr. Robotnik's Ring Racers " VERSIONSTRING " Error",
+		"Ring Racers E v2.4E Error",
 		finalmessage, NULL);
 
 	// Note that SDL_ShowSimpleMessageBox does *not* require SDL to be
@@ -380,6 +380,10 @@ static void I_ShowErrorMessageBox(const char *messagefordevelopers, boolean dump
 	// fullscreen window is closed before displaying the error message
 	// in case the fullscreen window blocks it for some absurd reason.
 }
+
+#if !(defined (__unix__) || defined(__APPLE__) || defined (UNIXCOMMON))
+static void Shittylogcopy(void); // defined further down: copies latest-log.txt to logs/log-DATE.txt
+#endif
 
 static void I_ReportSignal(int num, int coredumped, void* tracefromcpptrace)
 {
@@ -543,6 +547,11 @@ static void I_ReportSignal(int num, int coredumped, void* tracefromcpptrace)
 	sigmsg = msg;
 
 	I_OutputMsg("\nProcess killed by signal: %s\n\n", sigmsg);
+#if defined(LOGMESSAGES) && !(defined (__unix__) || defined(__APPLE__) || defined (UNIXCOMMON))
+	// On a crash the dated log is also saved (before it was only done on a clean exit)
+	if (logstream)
+		Shittylogcopy();
+#endif
 
 	I_ShowErrorMessageBox(sigmsg,
 #if defined (UNIXBACKTRACE)
@@ -1000,6 +1009,51 @@ static inline void I_ShutdownConsole(void){}
 //
 // StartupKeyboard
 //
+#if defined(_WIN32) && defined(RR_PCGEN)
+// [CRASH]: on a crash (uncaught exception) log the code, the address as module+offset
+// (game exe, Mesa, ANGLE, driver...) and the stack. Then continue with the previous filter (the CRT's, which calls
+// signal_handler: the game reports as usual). Resolve exe addresses: addr2line -f -e RingRacersE.exe 0x<base+off>
+static void rr_crash_where(const void *addr, char *out, size_t outsz)
+{
+	HMODULE mod = NULL;
+	char name[MAX_PATH] = "?";
+	if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)addr, &mod) && mod)
+	{
+		GetModuleFileNameA(mod, name, sizeof name);
+		const char *base = strrchr(name, '\\');
+		snprintf(out, outsz, "%s+0x%llx", base ? base + 1 : name, (unsigned long long)((const char *)addr - (const char *)mod));
+	}
+	else
+		snprintf(out, outsz, "%p", addr);
+}
+static LONG WINAPI rr_crash_filter(PEXCEPTION_POINTERS info)
+{
+	// Vectored handler: sees EVERY exception before anyone else (MinGW's CRT catches SIGSEGV before the
+	// uncaught-exception filter). Only serious ones and at most 4 (a driver may catch some on purpose:
+	// the last one in the log is the crash's).
+	static volatile LONG count = 0;
+	const DWORD code = (info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionCode : 0;
+	const bool severe = code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_ILLEGAL_INSTRUCTION
+		|| code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == EXCEPTION_STACK_OVERFLOW || code == EXCEPTION_PRIV_INSTRUCTION;
+	if (severe && InterlockedIncrement(&count) <= 4)
+	{
+		char where[MAX_PATH + 32];
+		rr_crash_where(info->ExceptionRecord->ExceptionAddress, where, sizeof where);
+		I_OutputMsg("[CRASH] exception 0x%08lX in %s (thread %lu)\n", (unsigned long)info->ExceptionRecord->ExceptionCode, where, (unsigned long)GetCurrentThreadId());
+		if (info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && info->ExceptionRecord->NumberParameters >= 2)
+			I_OutputMsg("[CRASH] %s at address %p\n", info->ExceptionRecord->ExceptionInformation[0] ? "write" : "read", (void *)info->ExceptionRecord->ExceptionInformation[1]);
+		void *frames[40];
+		const USHORT n = CaptureStackBackTrace(0, 40, frames, NULL);
+		for (USHORT i = 0; i < n; i++)
+		{
+			rr_crash_where(frames[i], where, sizeof where);
+			I_OutputMsg("[CRASH]   #%u %s\n", (unsigned)i, where);
+		}
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 static void I_RegisterSignals (void)
 {
 	g_main_thread_id = std::this_thread::get_id();
@@ -1026,6 +1080,11 @@ static void I_RegisterSignals (void)
 #ifdef USE_DBGHELP
 	// Initialize Windows SDK-specific crashdump handler (DbgHelp)
 	g_previous_toplevelexceptionfilter = SetUnhandledExceptionFilter(WriteMinidumpExceptionFilter);
+#endif
+#if defined(_WIN32) && defined(RR_PCGEN)
+	AddVectoredExceptionHandler(1, rr_crash_filter); // [CRASH]
+	if (M_CheckParm("-rrcrashtest")) // [CRASH] test: crashes on purpose
+		*(volatile int *)0 = 1;
 #endif
 }
 
@@ -1965,7 +2024,7 @@ FUNCIERROR void ATTRNORETURN I_Error(const char *error, ...)
 			extern consvar_t cv_fuzz;
 			if (!M_CheckParm("-dedicated") && !(cv_fuzz.value))
 				SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-					"Dr. Robotnik's Ring Racers " VERSIONSTRING " Recursive Error",
+					"Ring Racers E v2.4E Recursive Error",
 					buffer, NULL);
 
 			W_Shutdown();

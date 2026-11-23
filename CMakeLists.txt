@@ -91,40 +91,6 @@ else()
 	set(NOT_SRB2_CONFIG_SHARED_INTERNAL_LIBRARIES ON)
 endif()
 
-
-find_package(ZLIB REQUIRED)
-find_package(PNG REQUIRED)
-find_package(SDL2 CONFIG REQUIRED)
-find_package(CURL REQUIRED)
-find_package(Opus REQUIRED)
-if(WIN32 AND NOT MINGW)
-	find_package(cpptrace CONFIG REQUIRED)
-endif()
-# Use the one in thirdparty/fmt to guarantee a minimum version
-#find_package(FMT CONFIG REQUIRED)
-
-# libgme defaults to "Nuked" YM2612 emulator, which is
-# very SLOW. The system library probably uses the
-# default so just always build it.
-#find_package(GME REQUIRED)
-
-if (SRB2_CONFIG_ENABLE_WEBM_MOVIES)
-	find_package(YUV REQUIRED)
-
-	find_package(unofficial-libvpx CONFIG)
-	if(NOT unofficial-libvpx_FOUND)
-		find_package(VPX REQUIRED)
-	endif()
-
-	find_package(Ogg REQUIRED)
-	find_package(Vorbis REQUIRED)
-	find_package(VorbisEnc REQUIRED)
-endif()
-
-if(${PROJECT_SOURCE_DIR} MATCHES ${PROJECT_BINARY_DIR})
-	message(FATAL_ERROR "In-source builds will bring you a world of pain. Please make a separate directory to invoke CMake from.")
-endif()
-
 if ((${SRB2_USE_CCACHE}) AND (${CMAKE_C_COMPILER} MATCHES "clang"))
 	message(WARNING "Using clang and CCache: You may want to set environment variable CCACHE_CPP2=yes to prevent include errors during compile.")
 endif()
@@ -153,6 +119,26 @@ set(SRB2_SDL2_EXE_SUFFIX "" CACHE STRING "Optional executable suffix, separated 
 set(GIT_EXECUTABLE "git" CACHE FILEPATH "Path to git binary")
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/src)
+
+# On 3DS the libraries come from devkitPro portlibs, not from the system.
+# Declare the imported targets BEFORE add_subdirectory(src) so that
+# so that child CMakeLists find them via find_package or target_link_libraries.
+if(CMAKE_SYSTEM_NAME STREQUAL "Generic" OR DEFINED DEVKITPRO)
+	if(NOT TARGET ZLIB::ZLIB)
+		add_library(ZLIB::ZLIB UNKNOWN IMPORTED)
+		set_target_properties(ZLIB::ZLIB PROPERTIES
+			IMPORTED_LOCATION "${DEVKITPRO}/portlibs/3ds/lib/libz.a"
+			INTERFACE_INCLUDE_DIRECTORIES "${DEVKITPRO}/portlibs/3ds/include"
+		)
+	endif()
+	if(NOT TARGET PNG::PNG)
+		add_library(PNG::PNG UNKNOWN IMPORTED)
+		set_target_properties(PNG::PNG PROPERTIES
+			IMPORTED_LOCATION "${DEVKITPRO}/portlibs/3ds/lib/libpng.a"
+			INTERFACE_INCLUDE_DIRECTORIES "${DEVKITPRO}/portlibs/3ds/include"
+		)
+	endif()
+endif()
 
 add_subdirectory(src)
 
@@ -191,4 +177,8 @@ endif()
 list(APPEND EXE_NAME_PARTS ${SRB2_SDL2_EXE_SUFFIX})
 
 list(JOIN EXE_NAME_PARTS "_" EXE_NAME)
-set_target_properties(SRB2SDL2 PROPERTIES OUTPUT_NAME ${EXE_NAME})
+if(TARGET SRB2SDL2)
+	set_target_properties(SRB2SDL2 PROPERTIES OUTPUT_NAME ${EXE_NAME})
+endif()
+
+

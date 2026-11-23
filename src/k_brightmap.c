@@ -22,6 +22,34 @@
 
 static brightmapStorage_t *brightmapStorage = NULL;
 static size_t maxBrightmapStorage = 0;
+// Startup speed: the storage used to grow by 1 entry per Z_Realloc (copying the whole array each time)
+// and every texture was looked up with a linear scan = quadratic. On the 3DS that was ~10 s of boot.
+// Now: capacity doubling + a hash index (open addressing; stores index+1, 0 = empty).
+static size_t capBrightmapStorage = 0;
+static UINT32 *brightmapIndex = NULL;
+static size_t brightmapIndexMask = 0;
+
+static void K_BrightmapIndexInsert(size_t idx)
+{
+	size_t h = brightmapStorage[idx].textureHash & brightmapIndexMask;
+	while (brightmapIndex[h] != 0)
+		h = (h + 1) & brightmapIndexMask;
+	brightmapIndex[h] = (UINT32)(idx + 1);
+}
+
+static void K_BrightmapIndexRebuild(void)
+{
+	size_t size = 1024, i;
+	while (size < capBrightmapStorage * 2)
+		size <<= 1;
+	free(brightmapIndex);
+	brightmapIndex = (UINT32 *)calloc(size, sizeof(UINT32));
+	brightmapIndexMask = size - 1;
+	if (brightmapIndex == NULL)
+		return;
+	for (i = 0; i < maxBrightmapStorage; i++)
+		K_BrightmapIndexInsert(i);
+}
 
 /*--------------------------------------------------
 	static brightmapStorage_t *K_NewBrightmap(void)
@@ -37,7 +65,15 @@ static size_t maxBrightmapStorage = 0;
 static brightmapStorage_t *K_NewBrightmap(void)
 {
 	maxBrightmapStorage++;
-	brightmapStorage = (brightmapStorage_t *)Z_Realloc(brightmapStorage, sizeof(brightmapStorage_t) * (maxBrightmapStorage + 1), PU_STATIC, &brightmapStorage);
+	if (maxBrightmapStorage + 1 > capBrightmapStorage)
+	{
+		capBrightmapStorage = (capBrightmapStorage == 0) ? 256 : capBrightmapStorage * 2;
+		brightmapStorage = (brightmapStorage_t *)Z_Realloc(brightmapStorage, sizeof(brightmapStorage_t) * (capBrightmapStorage + 1), PU_STATIC, &brightmapStorage);
+		// the entries already stored are valid, the new one (index max-1) is not hashed yet
+		maxBrightmapStorage--;
+		K_BrightmapIndexRebuild();
+		maxBrightmapStorage++;
+	}
 	return &brightmapStorage[ maxBrightmapStorage - 1 ];
 }
 
@@ -68,6 +104,19 @@ static brightmapStorage_t *K_GetBrightmapStorageByTextureName(const char *checkN
 
 	if (maxBrightmapStorage == 0)
 	{
+		return NULL;
+	}
+
+	if (brightmapIndex != NULL)
+	{
+		size_t h = checkHash & brightmapIndexMask;
+		while (brightmapIndex[h] != 0)
+		{
+			brightmapStorage_t *bms = &brightmapStorage[brightmapIndex[h] - 1];
+			if (checkHash == bms->textureHash && !strncmp(checkName, bms->textureName, 8))
+				return bms;
+			h = (h + 1) & brightmapIndexMask;
+		}
 		return NULL;
 	}
 
@@ -121,6 +170,8 @@ static boolean K_BRIGHTLumpParser(char *data, size_t size)
 					bms = K_NewBrightmap();
 					strncpy(bms->textureName, tkn, 8);
 					bms->textureHash = quickncasehash(tkn, 8);
+					if (brightmapIndex != NULL)
+						K_BrightmapIndexInsert(maxBrightmapStorage - 1);
 				}
 
 				Z_Free(tkn);
@@ -247,6 +298,10 @@ void K_InitBrightmapsPwad(INT32 wadNum)
 	Z_Free(brightmapStorage);
 	brightmapStorage = NULL;
 	maxBrightmapStorage = 0;
+	capBrightmapStorage = 0;
+	free(brightmapIndex);
+	brightmapIndex = NULL;
+	brightmapIndexMask = 0;
 }
 
 /*--------------------------------------------------

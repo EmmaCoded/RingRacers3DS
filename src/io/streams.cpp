@@ -85,6 +85,15 @@ FileStream::FileStream(const std::string& path, FileStreamMode mode) : file_(nul
 		throw make_exception_from_errno(err);
 	}
 
+#ifdef __3DS__
+	// without a buffer, newlib writes in ~1 KB pieces and the 3DS SD card flushes on each
+	// writes: saving 110 KB took 2-4 s. With a 32 KB buffer it is 4 writes.
+	if (mode_ != FileStreamMode::kRead && std::setvbuf(file, nullptr, _IOFBF, 32768) == 0)
+	{
+		this->file_ = (void*) file;
+		return;
+	}
+#endif
 	// We want raw, unbuffered IO for the stream. Buffering can be layered on top.
 	if (std::setvbuf(file, nullptr, _IONBF, 0) != 0)
 	{
@@ -174,6 +183,8 @@ static int portable_fseek64(FILE* file, int64_t offset, int origin)
 	return _fseeki64(file, offset, origin);
 #elif __APPLE__ || defined(__FreeBSD__)
 	return fseeko(file, offset, origin);
+#elif defined(__3DS__)
+	return fseeko(file, (off_t)offset, origin);
 #else
 	return fseeko64(file, offset, origin);
 #endif
@@ -185,6 +196,8 @@ static int64_t portable_ftell64(FILE* file)
 	return _ftelli64(file);
 #elif __APPLE__ || defined(__FreeBSD__)
 	return ftello(file);
+#elif defined(__3DS__)
+	return (int64_t)ftello(file);
 #else
 	return ftello64(file);
 #endif

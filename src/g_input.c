@@ -726,6 +726,40 @@ static keyname_t keynames[] =
 	{KEY_MOUSEWHEELUP, "Wheel Up"},
 	{KEY_MOUSEWHEELDOWN, "Wheel Down"},
 
+#ifdef __3DS__
+	{KEY_JOY1+0, "B BUTTON"}, // by position
+	{KEY_JOY1+1, "A BUTTON"},
+	{KEY_JOY1+2, "Y BUTTON"},
+	{KEY_JOY1+3, "X BUTTON"},
+	{KEY_JOY1+4, "SELECT"},
+	{KEY_JOY1+5, "HOME"},
+	{KEY_JOY1+6, "START"},
+	{KEY_JOY1+7, "L-STICK CLICK"},
+	{KEY_JOY1+8, "R-STICK CLICK"},
+	{KEY_JOY1+9, "ZL"},
+	{KEY_JOY1+10, "ZR"},
+	{KEY_JOY1+11, "D-PAD UP"},
+	{KEY_JOY1+12, "D-PAD DOWN"},
+	{KEY_JOY1+13, "D-PAD LEFT"},
+	{KEY_JOY1+14, "D-PAD RIGHT"},
+	{KEY_JOY1+15, "MISC. BUTTON"},
+	{KEY_JOY1+16, "PADDLE1 BUTTON"},
+	{KEY_JOY1+17, "PADDLE2 BUTTON"},
+	{KEY_JOY1+18, "PADDLE3 BUTTON"},
+	{KEY_JOY1+19, "PADDLE4 BUTTON"},
+	{KEY_JOY1+20, "TOUCH SCREEN"},
+
+	{KEY_AXIS1+0, "CIRCLE PAD LEFT"},
+	{KEY_AXIS1+1, "CIRCLE PAD RIGHT"},
+	{KEY_AXIS1+2, "CIRCLE PAD UP"},
+	{KEY_AXIS1+3, "CIRCLE PAD DOWN"},
+	{KEY_AXIS1+4, "R-STICK LEFT"},
+	{KEY_AXIS1+5, "R-STICK RIGHT"},
+	{KEY_AXIS1+6, "R-STICK UP"},
+	{KEY_AXIS1+7, "R-STICK DOWN"},
+	{KEY_AXIS1+8, "L BUTTON"},
+	{KEY_AXIS1+9, "R BUTTON"},
+#else
 	{KEY_JOY1+0, "A BUTTON"},
 	{KEY_JOY1+1, "B BUTTON"},
 	{KEY_JOY1+2, "X BUTTON"},
@@ -758,6 +792,7 @@ static keyname_t keynames[] =
 	{KEY_AXIS1+7, "R-STICK DOWN"},
 	{KEY_AXIS1+8, "L TRIGGER"},
 	{KEY_AXIS1+9, "R TRIGGER"},
+#endif
 };
 
 static keyname_t shortkeynames[] =
@@ -849,6 +884,29 @@ static keyname_t shortkeynames[] =
 	{KEY_MOUSEWHEELUP, "Wheel Up"},
 	{KEY_MOUSEWHEELDOWN, "Wheel Down"},
 
+#ifdef __3DS__
+	{KEY_JOY1+0, "B"}, // by position
+	{KEY_JOY1+1, "A"},
+	{KEY_JOY1+2, "Y"},
+	{KEY_JOY1+3, "X"},
+	{KEY_JOY1+4, "SELECT"},
+	{KEY_JOY1+5, "HOME"},
+	{KEY_JOY1+6, "START"},
+	{KEY_JOY1+7, "LS"},
+	{KEY_JOY1+8, "RS"},
+	{KEY_JOY1+9, "ZL"},
+	{KEY_JOY1+10, "ZR"},
+	{KEY_JOY1+11, "D-UP"},
+	{KEY_JOY1+12, "D-DOWN"},
+	{KEY_JOY1+13, "D-LEFT"},
+	{KEY_JOY1+14, "D-RIGHT"},
+	{KEY_JOY1+15, "MISC."},
+	{KEY_JOY1+16, "PADDLE1"},
+	{KEY_JOY1+17, "PADDLE2"},
+	{KEY_JOY1+18, "PADDLE3"},
+	{KEY_JOY1+19, "PADDLE4"},
+	{KEY_JOY1+20, "TOUCH"},
+#else
 	{KEY_JOY1+0, "A"},
 	{KEY_JOY1+1, "B"},
 	{KEY_JOY1+2, "X"},
@@ -870,6 +928,7 @@ static keyname_t shortkeynames[] =
 	{KEY_JOY1+18, "PADDLE3"},
 	{KEY_JOY1+19, "PADDLE4"},
 	{KEY_JOY1+20, "TOUCHPAD"},
+#endif
 
 	{KEY_AXIS1+0, "LS LEFT"},
 	{KEY_AXIS1+1, "LS RIGHT"},
@@ -1111,6 +1170,19 @@ void G_DefineDefaultControls(void)
 	gamecontroldefault[gc_down ][2] = KEY_AXIS1+3; // Axis Y+
 	gamecontroldefault[gc_left ][2] = KEY_AXIS1+0; // Axis X-
 	gamecontroldefault[gc_right][2] = KEY_AXIS1+1; // Axis X+
+
+#ifdef __3DS__
+	// buttons by POSITION (i_video_3ds.c): JOY1+0 = B (down), +1 = A (right),
+	// +2 = Y (left), +3 = X (up).
+	// A = accelerate/accept, B = brake/back, Y = look back, X = spindash.
+	gamecontroldefault[gc_a    ][1] = KEY_JOY1+1;  // Accelerate  -> A
+	gamecontroldefault[gc_x    ][1] = KEY_JOY1+0;  // Brake       -> B
+	gamecontroldefault[gc_b    ][1] = KEY_JOY1+2;  // Look back   -> Y
+	gamecontroldefault[gc_c    ][1] = KEY_JOY1+3;  // Spindash    -> X
+	// Bail: touch screen (all models) and ZL (New 3DS)
+	gamecontroldefault[gc_y    ][1] = KEY_JOY1+20; // Touch screen
+	gamecontroldefault[gc_y    ][3] = KEY_JOY1+9;  // ZL
+#endif
 
 	#ifdef DEVELOP
 		gamecontroldefault[gc_console][0] = '`';

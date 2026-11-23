@@ -339,6 +339,9 @@ void PR_SaveProfiles(void)
 	{
 		try
 		{
+#ifdef __3DS__
+			{ std::error_code ec; fs::remove(fs::path(static_cast<std::string_view>(bakpath)), ec); }
+#endif
 			fs::rename(fs::path(static_cast<std::string_view>(realpath)), fs::path(static_cast<std::string_view>(bakpath)));
 		}
 		catch (const fs::filesystem_error& ex)
@@ -576,6 +579,19 @@ void PR_LoadProfiles(void)
 			converted = true;
 		}
 
+#ifdef __3DS__
+		// buttons by position. Old profiles (accelerate on JOY1+0) are converted to:
+		// A = accelerate, B = brake, Y = look back, X = spindash.
+		if (newprof->controls[gc_a][1] == KEY_JOY1+0)
+		{
+			newprof->controls[gc_a][1] = KEY_JOY1+1;
+			newprof->controls[gc_x][1] = KEY_JOY1+0;
+			newprof->controls[gc_b][1] = KEY_JOY1+2;
+			newprof->controls[gc_c][1] = KEY_JOY1+3;
+			CONS_Printf("[BUTTONS] profile '%s' switched to positional buttons\n", newprof->profilename);
+		}
+#endif
+
 		if (converted)
 		{
 			CONS_Printf("Profile '%s' was converted from version %d to version %d\n",
@@ -590,6 +606,12 @@ static void PR_ApplyProfile_Appearance(profile_t *p, UINT8 playernum)
 {
 	CV_StealthSet(&cv_skin[playernum], p->skinname);
 	CV_StealthSetValue(&cv_playercolor[playernum], p->color);
+#ifdef __3DS__
+	// 3DS: the auto-created profile has the in-game name "Guest"; show the profile name instead.
+	if (p != profilesList[PROFILE_GUEST] && !strcasecmp(p->playername, PROFILEDEFAULTPNAME) && p->profilename[0])
+		CV_StealthSet(&cv_playername[playernum], p->profilename);
+	else
+#endif
 	CV_StealthSet(&cv_playername[playernum], p->playername);
 
 	// Followers

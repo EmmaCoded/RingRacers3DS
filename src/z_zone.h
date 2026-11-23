@@ -140,6 +140,9 @@ void Z_SetUser(void *ptr, void **newuser);
 //
 #define Z_TagUsage(tagnum) Z_TagsUsage(tagnum, tagnum)
 size_t Z_TagsUsage(INT32 lowtag, INT32 hightag);
+#ifdef __3DS__
+void Z_3DS_ReportTags(const char *why);
+#endif
 #define Z_TotalUsage() Z_TagsUsage(0, INT32_MAX)
 
 //

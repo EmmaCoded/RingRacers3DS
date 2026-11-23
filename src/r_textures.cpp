@@ -331,6 +331,31 @@ UINT8 *R_GenerateTexture(size_t texnum)
 	texture = textures[texnum];
 	I_Assert(texture != NULL);
 
+#ifdef __3DS__
+	if (texture->patchcount == 0)
+	{
+		// Filler texture (there is no texture pk3 on 3DS): solid composite
+		// with a gray checkerboard. Before, the column offsets pointed to a block
+		// of 4+w*4 bytes and the renderer read garbage memory -> colored lines
+		// random on the walls of the title background.
+		const int tw = texture->width, th = texture->height;
+		blocksize = (size_t)tw * 4 + (size_t)tw * th;
+		block = (UINT8*)Z_Malloc(blocksize + 1, PU_STATIC, &texturecache[texnum]);
+		texturecolumnofs[texnum] = (UINT32*)block;
+		texture->holes = false;
+		texture->flip = 0;
+		UINT8 *tex = block + tw * 4;
+		for (x = 0; x < tw; x++)
+		{
+			((UINT32*)block)[x] = LONG((UINT32)(x * th + tw * 4));
+			for (i = 0; i < th; i++)
+				tex[x * th + i] = (((x >> 3) ^ (i >> 3)) & 1) ? 8 : 12;
+		}
+		block[blocksize] = 0;
+		return block;
+	}
+#endif
+
 	// allocate texture column offset lookup
 
 	// single-patch textures can have holes in them and may be used on
@@ -357,6 +382,16 @@ UINT8 *R_GenerateTexture(size_t texnum)
 
 		pdata = (UINT8*)W_CacheLumpNumPwad(wadnum, lumpnum, PU_LEVEL);
 		realpatch = (softwarepatch_t *)pdata;
+#ifdef __3DS__
+		if (pdata == NULL || lumplength < 8)
+		{
+			CONS_Printf("[3DS] texture %s: unreadable patch (wad %d lump %d)\n", texture->name, wadnum, lumpnum);
+			block = R_AllocateDummyTextureBlock(texture->width, &texturecache[texnum]);
+			texturecolumnofs[texnum] = (UINT32*)&block[4];
+			textures[texnum]->holes = true;
+			return block;
+		}
+#endif
 
 #ifndef NO_PNG_LUMPS
 		if (Picture_IsLumpPNG((UINT8 *)realpatch, lumplength))
@@ -454,6 +489,13 @@ UINT8 *R_GenerateTexture(size_t texnum)
 		lumplength = W_LumpLengthPwad(wadnum, lumpnum);
 		realpatch = (softwarepatch_t *)pdata;
 		dealloc = true;
+#ifdef __3DS__
+		if (pdata == NULL || lumplength < 8)
+		{
+			CONS_Printf("[3DS] texture %s: patch %d unreadable\n", texture->name, i);
+			continue;
+		}
+#endif
 
 #ifndef NO_PNG_LUMPS
 		if (Picture_IsLumpPNG((UINT8 *)realpatch, lumplength))
@@ -469,6 +511,10 @@ UINT8 *R_GenerateTexture(size_t texnum)
 			(void)lumplength;
 			dealloc = false;
 		}
+#ifdef __3DS__
+		if (realpatch == NULL)
+			continue;
+#endif
 
 		x1 = patch->originx;
 		width = SHORT(realpatch->width);
@@ -598,7 +644,7 @@ static void R_ConvertBrightmapColumn(UINT8 *p, const column_t *tcol, const colum
 		// texture column, so pad it with black
 		// pixels.
 
-		n = std::max(0, std::min(btop, tbot) - y);
+		n = std::max<INT32>(0, std::min<INT32>(btop, tbot) - y);
 		memset(&p[y - ttop], TRANSPARENTPIXEL, n);
 		y += n;
 
@@ -610,7 +656,7 @@ static void R_ConvertBrightmapColumn(UINT8 *p, const column_t *tcol, const colum
 		// Copy parts of the brightmap column which
 		// line up with the texture column.
 
-		n = std::max(0, std::min(bbot, tbot) - y);
+		n = std::max<INT32>(0, std::min<INT32>(bbot, tbot) - y);
 		memcpy(&p[y - ttop], (const UINT8*)bcol + 3 + (y - btop), n);
 		y += n;
 
@@ -878,6 +924,10 @@ static inline INT32 wrap_column(fixed_t tex, INT32 col)
 //
 UINT8 *R_GetColumn(fixed_t tex, INT32 col)
 {
+#ifdef __3DS__
+	if (tex < 0 || tex >= numtextures || !textures || !textures[tex])
+		tex = 0;
+#endif
 	if (!texturecache[tex])
 		R_GenerateTexture(tex);
 
@@ -1515,6 +1565,103 @@ static void R_FinishLoadingTextures(INT32 add)
 	g_texturenum_dbgline = R_CheckTextureNumForName("DBGLINE");
 }
 
+#ifdef __3DS__
+r3ds_texinfo_t *r3ds_texinfo = NULL;
+INT32 r3ds_numtex = 0;
+UINT16 r3ds_texwad = 0, r3ds_datalump = 0;
+
+static inline UINT16 R3DS_LE16(const UINT8 *p) { return (UINT16)(p[0] | (p[1] << 8)); }
+static inline UINT32 R3DS_LE32(const UINT8 *p) { return (UINT32)p[0] | ((UINT32)p[1] << 8) | ((UINT32)p[2] << 16) | ((UINT32)p[3] << 24); }
+
+// Registers the pack's textures. Index 0 = empty texture (like "-").
+// All texture_t go in ONE block (no patches) to save RAM.
+static boolean R_3DS_LoadTexturePack(void)
+{
+	INT32 w;
+	UINT16 ixlump = INT16_MAX;
+	for (w = numwadfiles - 1; w >= 0; w--)
+	{
+		ixlump = W_CheckNumForNamePwad("3DSTEXIX", (UINT16)w, 0);
+		if (ixlump != INT16_MAX)
+			break;
+	}
+	if (w < 0 || ixlump == INT16_MAX)
+	{
+		CONS_Printf("3DS tex: ringracers_3ds.pk3 not found\n");
+		return false;
+	}
+	const UINT16 dtlump = W_CheckNumForNamePwad("3DSTEXDT", (UINT16)w, 0);
+	if (dtlump == INT16_MAX)
+	{
+		CONS_Printf("3DS tex: missing 3DSTEXDT\n");
+		return false;
+	}
+
+	const size_t len = W_LumpLengthPwad((UINT16)w, ixlump);
+	UINT8 *ix = (UINT8 *)W_CacheLumpNumPwad((UINT16)w, ixlump, PU_STATIC);
+	if (!ix || len < 12 || memcmp(ix, "T3DI", 4))
+	{
+		CONS_Printf("3DS tex: invalid index\n");
+		if (ix) Z_Free(ix);
+		return false;
+	}
+	const UINT32 ver = R3DS_LE32(ix + 4);
+	const UINT32 n = R3DS_LE32(ix + 8);
+	if (ver != 1 || 12 + (size_t)n * 24 > len)
+	{
+		CONS_Printf("3DS tex: version %u / bad size\n", (unsigned)ver);
+		Z_Free(ix);
+		return false;
+	}
+
+	const INT32 total = (INT32)n + 1;
+	R_AllocateTextures(total);
+	texture_t *block = (texture_t *)Z_Calloc(sizeof(texture_t) * total, PU_STATIC, NULL);
+	r3ds_texinfo = (r3ds_texinfo_t *)Z_Calloc(sizeof(r3ds_texinfo_t) * total, PU_STATIC, NULL);
+	r3ds_numtex = total;
+	r3ds_texwad = (UINT16)w;
+	r3ds_datalump = dtlump;
+
+	// 0: empty
+	textures[0] = &block[0];
+	M_Memcpy(block[0].name, "-3DSDUMM", 8);
+	block[0].hash = quickncasehash(block[0].name, 8);
+	block[0].width = block[0].height = 64;
+	block[0].type = TEXTURETYPE_COMPOSITE;
+	block[0].terrainID = (size_t)-1;
+	texturewidth[0] = 64;
+	textureheight[0] = 64 << FRACBITS;
+
+	for (UINT32 k = 0; k < n; k++)
+	{
+		const UINT8 *e = ix + 12 + k * 24;
+		texture_t *t = &block[k + 1];
+		r3ds_texinfo_t *inf = &r3ds_texinfo[k + 1];
+		M_Memcpy(t->name, e, 8);
+		t->hash = quickncasehash(t->name, 8);
+		t->width = (INT16)R3DS_LE16(e + 8);
+		t->height = (INT16)R3DS_LE16(e + 10);
+		inf->gw = R3DS_LE16(e + 12);
+		inf->gh = R3DS_LE16(e + 14);
+		inf->fmt = e[16];
+		inf->offset = R3DS_LE32(e + 20);
+		t->type = TEXTURETYPE_COMPOSITE;
+		t->holes = (inf->fmt != 0);
+		t->flip = 0;
+		t->patchcount = 0;
+		t->terrainID = K_GetTerrainIDForTextureName(t->name);
+		textures[k + 1] = t;
+		texturewidth[k + 1] = t->width;
+		textureheight[k + 1] = t->height << FRACBITS;
+	}
+	Z_Free(ix);
+
+	R_FinishLoadingTextures(total);
+	CONS_Printf("3DS tex: %d textures from the pack (wad %d)\n", (int)n, (int)w);
+	return true;
+}
+#endif
+
 //
 // R_LoadTextures
 // Initializes the texture list with the textures from the world map.
@@ -1533,8 +1680,34 @@ void R_LoadTextures(void)
 	}
 
 	// If no textures found by this point, bomb out
+#ifdef __3DS__
+	// Textures from ringracers_3ds.pk3 (3DSTEXIX index + 3DSTEXDT data)
+	if (!newtextures && R_3DS_LoadTexturePack())
+		return;
+	// On 3DS texture pk3s are skipped to save memory; gracefully handle 0 textures
+	if (!newtextures)
+	{
+		texture_t *dummy;
+		I_OutputMsg("R_LoadTextures: no textures loaded (3DS memory-saving mode), creating dummy\n");
+		R_AllocateTextures(1);
+		dummy = textures[0] = (texture_t*)Z_Calloc(sizeof(texture_t) + sizeof(texpatch_t), PU_STATIC, NULL);
+		M_Memcpy(dummy->name, "-3DSDUMM", 8);
+		dummy->hash = quickncasehash(dummy->name, 8);
+		dummy->width = 64;
+		dummy->height = 64;
+		dummy->type = TEXTURETYPE_COMPOSITE;
+		dummy->patchcount = 0;
+		dummy->terrainID = -1;
+		texturewidth[0] = 64;
+		textureheight[0] = 64 << FRACBITS;
+		R_FinishLoadingTextures(1);
+		g_texturenum_dbgline = -1;
+		return;
+	}
+#else
 	if (!newtextures)
 		I_Error("No textures detected in any WADs!\n");
+#endif
 
 	R_AllocateTextures(newtextures);
 
@@ -2110,6 +2283,41 @@ INT32 R_CheckTextureNumForName(const char *name)
 		return 0;
 
 	hash = quickncasehash(name, 8);
+
+#ifdef __3DS__
+	// name->texture hash index. Before: linear search over 18063 textures
+	// + a linear tidcache with Z_Realloc on every hit => K_InitBrightmaps took
+	// ~47 s and P_InitPicAnims ~6 s at startup (Azahar, original hardware).
+	{
+		static INT32 *s_head = NULL, *s_next = NULL;
+		static INT32 s_built = -1, s_cap = 0;
+		static texture_t **s_tex = NULL;
+		enum { kBuckets = 8192 };
+		if (s_built != numtextures || s_tex != textures)
+		{
+			if (!s_head) s_head = (INT32 *)malloc(kBuckets * sizeof(INT32));
+			if (numtextures > s_cap)
+			{
+				free(s_next);
+				s_cap = numtextures + 1024;
+				s_next = (INT32 *)malloc(s_cap * sizeof(INT32));
+			}
+			for (i = 0; i < kBuckets; i++) s_head[i] = -1;
+			for (i = 0; i < numtextures; i++) // ascending: the head ends up with the highest index
+			{
+				const UINT32 b = textures[i]->hash & (kBuckets - 1);
+				s_next[i] = s_head[b];
+				s_head[b] = i;
+			}
+			s_built = numtextures;
+			s_tex = textures;
+		}
+		for (i = s_head[hash & (kBuckets - 1)]; i >= 0; i = s_next[i])
+			if (textures[i]->hash == hash && !strncasecmp(textures[i]->name, name, 8))
+				return i;
+		return -1;
+	}
+#endif
 
 	for (i = 0; i < tidcachelen; i++)
 		if (tidcache[i].hash == hash && !strncasecmp(tidcache[i].name, name, 8))

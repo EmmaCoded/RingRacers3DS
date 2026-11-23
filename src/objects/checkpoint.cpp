@@ -228,11 +228,32 @@ struct Checkpoint : mobj_t
 			}
 		}
 
+#ifdef __3DS__
+		// 3DS: the idle spark line creates ~10-20 objects per tic per pair.
+		// Only near the camera and on even tics.
+		if ((leveltime & 1) == 0 && near_camera() && !top_half_has_passed())
+#else
 		if (!top_half_has_passed())
+#endif
 		{
 			sparkle_between(0);
 		}
 	}
+
+#ifdef __3DS__
+	bool near_camera() const
+	{
+		const fixed_t kDist = 2048 * mapobjectscale;
+		for (int i = 0; i <= r_splitscreen; i++)
+		{
+			const player_t* p = &players[displayplayers[i]];
+			if (p->mo && !P_MobjWasRemoved(p->mo)
+				&& P_AproxDistance(p->mo->x - x, p->mo->y - y) < kDist)
+				return true;
+		}
+		return false;
+	}
+#endif
 
 	void twirl(angle_t dir, fixed_t multiplier)
 	{
@@ -406,7 +427,11 @@ private:
 		else
 		{
 			p->color = color;
+#ifdef __3DS__
+			p->fuse = 3; // spawned every 2 tics
+#else
 			p->fuse = 2;
+#endif
 		}
 	}
 
@@ -435,7 +460,12 @@ private:
 
 		between = R_PointToDist2(0, z, between, other()->z);
 
-		for (; ofs < between; ofs += 2 * r)
+#ifdef __3DS__
+		const fixed_t stepr = momentum ? 2 * r : 4 * r; // idle: half the sparks
+#else
+		const fixed_t stepr = 2 * r;
+#endif
+		for (; ofs < between; ofs += stepr)
 		{
 			spawn_sparkle(
 				{x + FixedMul(ofs, step.x), y + FixedMul(ofs, step.y), z + (kSparkleZ * scale) + FixedMul(ofs, step.z)},

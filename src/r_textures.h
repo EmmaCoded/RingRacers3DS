@@ -73,6 +73,19 @@ struct texture_t
 // all loaded and prepared textures from the start of the game
 extern texture_t **textures;
 
+#ifdef __3DS__
+// ringracers_3ds.pk3 pack: per-texture info to read its pixels on demand
+typedef struct
+{
+	UINT32 offset;   // offset in 3DSTEXDT (0 if it does not come from the pack)
+	UINT16 gw, gh;   // size on the GPU (pow2, <=256); gw==0 -> does not come from the pack
+	UINT8 fmt;       // 0 indices, 1 (index,alpha), 2 indices + 1-bit mask
+} r3ds_texinfo_t;
+extern r3ds_texinfo_t *r3ds_texinfo;
+extern INT32 r3ds_numtex;
+extern UINT16 r3ds_texwad, r3ds_datalump;
+#endif
+
 extern INT32 *texturewidth;
 extern fixed_t *textureheight; // needed for texture pegging
 

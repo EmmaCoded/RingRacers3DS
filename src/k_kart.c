@@ -64,6 +64,7 @@
 #include "music.h"
 #include "m_easing.h"
 #include "k_endcam.h"
+#include "rr_config.h" // bot_wp_mask; RR_LOWEND (PC low-end mode)
 
 // SOME IMPORTANT VARIABLES DEFINED IN DOOMDEF.H:
 // gamespeed is cc (0 for easy, 1 for normal, 2 for hard)
@@ -71,6 +72,18 @@
 // encoremode is Encore Mode (duh), bool
 // comeback is Battle Mode's karma comeback, also bool
 // mapreset is set when enough players fill an empty server
+#ifdef RR_LOWEND_CODE
+// karts that are NOT the on-screen player (bots): no dust/smoke/speed-line particles.
+// With 8 racers those effects were ~50 ms of the thinkers per tic. Invincibility auras, items and
+// shields are NOT touched. rr_config: bot_effects=1 brings them back.
+static boolean RR3DS_QuietKart(const player_t *p)
+{
+	static int on = -1;
+	if (on < 0) on = !RRCfg_Int("bot_effects", 0);
+	return RR_LOWEND && on && p && p->bot && !P_IsDisplayPlayer(p);
+}
+#endif
+
 
 UINT8 K_SetPlayerItemAmount(player_t *player, INT32 amount)
 {
@@ -1504,6 +1517,13 @@ static void K_DrawDraftCombiring(player_t *player, mobj_t *victim, fixed_t curdi
 	fixed_t curx, cury, curz;
 	UINT8 c;
 
+#ifdef RR_LOWEND_CODE
+	// drafting band between two rivals (neither is the on-screen one): not created.
+	// It was ~5 new sparks per tic per pair, decoration only.
+	if (RR3DS_QuietKart(player) && !(victim && victim->player && P_IsDisplayPlayer(victim->player)))
+		return;
+#endif
+
 	if (maxdist == 0)
 	{
 		c = leveltime % CHAOTIXBANDCOLORS;
@@ -2001,6 +2021,9 @@ void K_MatchGenericExtraFlagsNoZAdjust(mobj_t *mo, mobj_t *master)
 
 void K_SpawnDashDustRelease(player_t *player)
 {
+#ifdef RR_LOWEND_CODE
+	if (RR3DS_QuietKart(player)) return;
+#endif
 	fixed_t newx;
 	fixed_t newy;
 	mobj_t *dust;
@@ -2187,6 +2210,9 @@ void K_SpawnDriftBoostClipSpark(mobj_t *clip)
 
 static void K_SpawnGenericSpeedLines(player_t *player, boolean top)
 {
+#ifdef RR_LOWEND_CODE
+	if (RR3DS_QuietKart(player)) return;
+#endif
 	fixed_t rand_x;
 	fixed_t rand_y;
 	fixed_t rand_z;
@@ -6260,7 +6286,13 @@ void K_SpawnMineExplosion(mobj_t *source, skincolornum_t color, tic_t delay)
 	if (!color)
 		color = SKINCOLOR_KETCHUP;
 
+#ifdef __3DS__
+	// 3DS: the mine explosion made 96 objects at once (32 smoke + 32 fireballs + 16 + 16):
+	// keep the same ring and spread with a quarter of them.
+	for (i = 0; i < 32; i += 4)
+#else
 	for (i = 0; i < 32; i++)
+#endif
 	{
 		fixed_t rand_x;
 		fixed_t rand_y;
@@ -6299,7 +6331,11 @@ void K_SpawnMineExplosion(mobj_t *source, skincolornum_t color, tic_t delay)
 		truc->renderflags |= RF_DONTDRAW;
 	}
 
+#ifdef __3DS__
+	for (i = 0; i < 16; i += 4)
+#else
 	for (i = 0; i < 16; i++)
+#endif
 	{
 		fixed_t rand_x;
 		fixed_t rand_y;
@@ -6366,7 +6402,11 @@ void K_SpawnLandMineExplosion(mobj_t *source, skincolornum_t color, tic_t delay)
 	smoldering->hitlag = delay;
 
 	// spawn a few physics explosions
+#ifdef __3DS__
+	for (i = 0; i < 15; i += 3) // 3DS: 5 instead of 15 physics explosions
+#else
 	for (i = 0; i < 15; i++)
+#endif
 	{
 		expl = P_SpawnMobj(source->x, source->y, source->z + source->scale, MT_BOOMEXPLODE);
 		expl->color = color;
@@ -6857,7 +6897,11 @@ static void K_SpawnDriftSparks(player_t *player)
 
 	if (player->driftcharge >= dsthree)
 	{
+#ifdef RR_LOWEND_CODE
+		if (RR_LOWEND ? (leveltime % 8 == 0) : (cv_reducevfx.value || leveltime % 2 == 0))
+#else
 		if (cv_reducevfx.value || leveltime % 2 == 0)
+#endif
 		{
 			K_SpawnDriftElectricity(player);
 		}
@@ -6865,6 +6909,9 @@ static void K_SpawnDriftSparks(player_t *player)
 
 	if (leveltime % 2 == 1)
 		return;
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND && (leveltime % 8)) return; // 3DS: 75% fewer sparks
+#endif
 
 	if (!player->drift
 		|| (player->driftcharge < dsone && !(player->driftcharge < 0)))
@@ -7049,6 +7096,9 @@ void K_SpawnBoostTrail(player_t *player)
 	I_Assert(player != NULL);
 	I_Assert(player->mo != NULL);
 	I_Assert(!P_MobjWasRemoved(player->mo));
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND && (leveltime % 4)) return; // 3DS: 75% fewer particles
+#endif
 
 	if (!P_IsObjectOnGround(player->mo)
 		|| player->hyudorotimer != 0)
@@ -7111,6 +7161,9 @@ void K_SpawnSparkleTrail(mobj_t *mo)
 
 	I_Assert(mo != NULL);
 	I_Assert(!P_MobjWasRemoved(mo));
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND && (leveltime % 3)) return; // 3DS: ~67% fewer particles
+#endif
 
 	if (leveltime & 2)
 		index = 1;
@@ -7161,6 +7214,9 @@ void K_SpawnWipeoutTrail(mobj_t *mo)
 
 	I_Assert(mo != NULL);
 	I_Assert(!P_MobjWasRemoved(mo));
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND && (leveltime % 3)) return; // 3DS: ~67% fewer particles
+#endif
 
 	if (mo->player)
 		aoff = (mo->player->drawangle + ANGLE_180);
@@ -7215,6 +7271,9 @@ void K_SpawnFireworkTrail(mobj_t *mo)
 
 void K_SpawnDraftDust(mobj_t *mo)
 {
+#ifdef RR_LOWEND_CODE
+	if (RR3DS_QuietKart(mo->player)) return;
+#endif
 	UINT8 i;
 
 	I_Assert(mo != NULL);
@@ -7304,6 +7363,9 @@ void K_DriftDustHandling(mobj_t *spawner)
 	angle_t anglediff;
 	const INT16 spawnrange = spawner->radius >> FRACBITS;
 
+	#ifdef __3DS__
+	if (leveltime % 8) return; // 3DS: 75% less dust
+#endif
 	if (!P_IsObjectOnGround(spawner) || leveltime % 2 != 0 || spawner->destscale == 1)
 		return;
 
@@ -7883,6 +7945,9 @@ static void K_DoLightningShield(player_t *player)
 
 static void K_FlameDashLeftoverSmoke(mobj_t *src)
 {
+#ifdef RR_LOWEND_CODE
+	if (RR3DS_QuietKart(src->player)) return;
+#endif
 	UINT8 i;
 
 	for (i = 0; i < 2; i++)
@@ -9779,6 +9844,10 @@ static inline BlockItReturn_t PIT_AttractingRings(mobj_t *thing)
 		return BMIT_CONTINUE; // Too far away
 	}
 
+#ifdef RR_LOWEND_CODE
+	RR3DS_RingWake(thing); // the magnet is going to move it: wake the sleeping ring
+#endif
+
 	if (RINGTOTAL(attractmo->player) >= 20 || !P_CanPickupItem(attractmo->player, PICKUP_RINGORSPHERE))
 	{
 		// Already reached max -- just joustle rings around.
@@ -10055,7 +10124,12 @@ void K_KartPlayerThink(player_t *player, ticcmd_t *cmd)
 					K_SpawnNormalSpeedLines(player);
 			}
 
-			if (player->numboosts > 0) // Boosting after images
+			if (player->numboosts > 0
+#ifdef RR_LOWEND_CODE
+				// bots out of the display players' view: no afterimages at all (13 MT_GHOST per tic cost ~0.6 ms)
+				&& !RR3DS_QuietKart(player)
+#endif
+				) // Boosting after images
 			{
 				mobj_t *ghost;
 				ghost = P_SpawnGhostMobj(player->mo);
@@ -12423,6 +12497,15 @@ static void K_UpdateDistanceFromFinishLine(player_t *const player)
 			boolean pathfindsuccess = false;
 			path_t pathtofinish = {0};
 
+#ifdef RR_LOWEND_CODE
+			if (RR_LOWEND)
+			{
+				UINT32 cachedtotal = 0; // cached A* (3DS / low-end mode only)
+				pathfindsuccess = K_PathDistToFinishCached(player->nextwaypoint, finishline, &cachedtotal);
+				pathtofinish.totaldist = cachedtotal;
+			}
+			else
+#endif
 			pathfindsuccess =
 				K_PathfindToWaypoint(player->nextwaypoint, finishline, &pathtofinish, useshortcuts, huntbackwards);
 
@@ -12614,6 +12697,11 @@ static void K_UpdatePlayerWaypoints(player_t *const player)
 
 	// Update prev value (used for grief prevention code)
 	player->distancetofinishprev = player->distancetofinish;
+#ifdef RR_LOWEND_CODE
+	// low-end: a bot refreshes its distance to the finish 1 of every 4 tics (2 A* paths each; the
+	// position only lags 3 tics). Humans every tic.
+	if (!(RR_LOWEND && player->bot && player->distancetofinish != 0 && ((leveltime + (UINT32)(player - players)) & 3)))
+#endif
 	K_UpdateDistanceFromFinishLine(player);
 
 	UINT32 delta = u32_delta(player->distancetofinish, player->distancetofinishprev);
@@ -13787,6 +13875,20 @@ void K_UpdateAllPlayerPositions(void)
 			player->cheatchecknum = player->lastsafecheatcheck;
 		}
 
+#ifdef RR_LOWEND_CODE
+		// with 8 racers this waypoint search was ~18 ms per tic. Bots
+		// repeat it only 1 of every (mask+1) tics, staggered; the human player always does.
+		{
+			static int rrMask = -1;
+			static int rrHumMask = -1; // the human every 2 tics
+			if (rrMask < 0) { rrMask = RRCfg_Int("bot_wp_mask", 7); rrHumMask = RRCfg_Int("human_wp_mask", 1); }
+			if (RR_LOWEND && rrHumMask > 0 && !player->bot && player->currentwaypoint != NULL
+				&& player->respawn.state == RESPAWNST_NONE && ((leveltime + (tic_t)i) & (tic_t)rrHumMask))
+				continue;
+			if (RR_LOWEND && rrMask > 0 && player->bot && !P_IsDisplayPlayer(player) && ((leveltime + (tic_t)i) & (tic_t)rrMask))
+				continue;
+		}
+#endif
 		K_UpdatePlayerWaypoints(player);
 	}
 
@@ -14158,6 +14260,9 @@ void K_KartEbrakeVisuals(player_t *p)
 
 static void K_KartSpindashDust(mobj_t *parent)
 {
+#ifdef RR_LOWEND_CODE
+	if (RR3DS_QuietKart(parent->player)) return;
+#endif
 	fixed_t rad = FixedDiv(FixedHypot(parent->radius, parent->radius), parent->scale);
 	INT32 i;
 
@@ -16864,6 +16969,13 @@ void K_CheckSpectateStatus(boolean considermapreset)
 			// This spectator does not want to join.
 			continue;
 		}
+
+#ifdef RR_PCGEN
+		// Ring Racers E: low-end player waiting for the host to switch to low-end (when the round ends).
+		// cv_rrnetlowwait is a netvar -> every machine decides the same (no desync).
+		if (netgame && (cv_rrnetlowwait.value & (1 << i)))
+			continue;
+#endif
 
 		if (netgame && numingame > 0 && players[i].spectatorReentry > 0)
 		{

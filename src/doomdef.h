@@ -54,6 +54,23 @@
 #include <sys/stat.h>
 #include <ctype.h>
 
+#ifdef __3DS__
+// newlib's toupper/tolower access locale tables in low memory (0x000000A0 etc.)
+// that Azahar does not map - causes an unmapped Read32 in a loop when entering the game loop.
+// Only replace in plain C: in C++ locale_facets.h uses toupper(c, locale) with 2 args
+// and a 1-arg #define breaks libstdc++ compilation.
+#ifndef __cplusplus
+#ifdef toupper
+#undef toupper
+#endif
+#ifdef tolower
+#undef tolower
+#endif
+#define toupper(c) (((c) >= 'a' && (c) <= 'z') ? ((c) - 32) : (c))
+#define tolower(c) (((c) >= 'A' && (c) <= 'Z') ? ((c) + 32) : (c))
+#endif // !__cplusplus
+#endif // __3DS__
+
 #ifdef _WIN32
 #include <io.h>
 #endif
@@ -93,6 +110,18 @@ extern char logfilename[1024];
 
 /* A mod name to further distinguish versions. */
 #define SRB2APPLICATION "RingRacers"
+
+/* Ring Racers E (PC): name sent by the CLIENT when asking to join. Different from the original so that
+   E ONLY plays with other E builds (different files and logic). Lua and serverinfo keep using SRB2APPLICATION. */
+#ifdef RR_PCGEN
+#define RR_NETAPP "RingRacersE"
+/* Subversion the E server announces in serverinfo: the official 2.4's (E is 2.5 internally).
+   This way the original Ring Racers 2.4 does not silently drop it: it asks to join and gets the notice
+   "This is a Ring Racers E game". The E client expects this exact number. */
+#define RR_NETINFO_SUBVERSION 4
+#else
+#define RR_NETAPP SRB2APPLICATION
+#endif
 
 //#define DEVELOP // Disable this for release builds to remove excessive cheat commands and enable MD5 checking and stuff, all in one go. :3
 #ifdef DEVELOP

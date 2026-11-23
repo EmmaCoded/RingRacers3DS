@@ -13,11 +13,13 @@
 
 #ifdef __GNUC__
 #include <unistd.h>
+#include "rr_config.h"
 #endif
 
 #include "k_menu.h"
 
 #include "doomdef.h"
+#include "rr_nete.h" // Ring Racers E: My IP Addresses notice
 #include "d_main.h"
 #include "d_netcmd.h"
 #include "console.h"
@@ -90,6 +92,12 @@ int	snprintf(char *str, size_t n, const char *fmt, ...);
 
 #ifdef HAVE_DISCORDRPC
 #include "discord.h"
+#endif
+
+#ifdef __3DS__
+void P_3DS_MapPics(INT32 i, boolean thumb, boolean mini); // p_setup.cpp 
+int I_3DS_GpuBlendOn(void); // dummy/gpu_present_3ds.c
+void I_3DS_GpuBlendPatch(const void *p); // dummy/twodee_soft_3ds.cpp
 #endif
 
 fixed_t M_TimeFrac(tic_t tics, tic_t duration)
@@ -199,11 +207,13 @@ void M_PickMenuBGMap(void)
 			continue;
 		}
 
+#ifndef __3DS__ // on 3DS thumbnails are loaded on demand (they are not available yet)
 		if (mapheaderinfo[i]->thumbnailPic == NULL)
 		{
 			// No image...
 			continue;
 		}
+#endif
 
 		if ((mapheaderinfo[i]->typeoflevel & (TOL_SPECIAL|TOL_VERSUS)) != 0)
 		{
@@ -294,21 +304,61 @@ void M_DrawMenuBackground(void)
 		M_PickMenuBGMap();
 	}
 
+#ifdef __3DS__
+	// FIXED background by default (stretching the thumbnail with a colormap to full screen
+	// every frame dropped the menu to ~32 fps). rr_config.txt: map_background = 1 for the thumbnail.
+	static int rr3ds_mapBgCfg = -1; // read ONCE (before: fopen on the SD every frame)
+	if (rr3ds_mapBgCfg < 0) rr3ds_mapBgCfg = RRCfg_On("map_background");
+	const boolean rr3ds_background = rr3ds_mapBgCfg;
+	if (rr3ds_background) P_3DS_MapPics(bgMapID, true, false);
+	patch_t *bgMapImage = rr3ds_background ? (patch_t *)mapheaderinfo[bgMapID]->thumbnailPic : NULL;
+#else
 	patch_t *bgMapImage = mapheaderinfo[bgMapID]->thumbnailPic;
+#endif
 	if (bgMapImage == NULL)
 	{
 		bgMapImage = W_CachePatchName("MENUBG4", PU_CACHE);
 	}
 
+#ifdef __3DS__
+	// background with the small thumbnail (80x50) stretched to full screen
+	{ const fixed_t bs = (bgMapImage->width > 0) ? FixedDiv(BASEVIDWIDTH << FRACBITS, bgMapImage->width << FRACBITS) : FRACUNIT;
+	  V_DrawStretchyFixedPatch(0, 0, bs, bs, 0, bgMapImage, R_GetTranslationColormap(TC_RAINBOW, SKINCOLOR_SLATE, GTC_MENUCACHE)); }
+#else
 	V_DrawFixedPatch(0, 0, FRACUNIT, 0, bgMapImage, R_GetTranslationColormap(TC_RAINBOW, SKINCOLOR_SLATE, GTC_MENUCACHE));
+#endif
+#ifdef __3DS__
+	// (step 1): full-screen BLEND layers (add/subtract) cost ~18 ms per
+	// frame on 3DS (blended on the CPU). Off by default: rr_config.txt menu_blend = 1
+	// to see them. (Step 2: draw them on the GPU.)
+	static int rr3ds_blend_c = -1; // read ONCE
+	if (rr3ds_blend_c < 0) rr3ds_blend_c = RRCfg_On("menu_blend");
+	const boolean rr3ds_blend = rr3ds_blend_c;
+	if (rr3ds_blend)
+#endif
 	V_DrawFixedPatch(0, 0, FRACUNIT, V_ADD, W_CachePatchName("MENUCUTD", PU_CACHE), NULL);
 	V_DrawFixedPatch(0, 0, FRACUNIT, 0, W_CachePatchName("MENUCUT", PU_CACHE), NULL);
 
 	V_DrawFixedPatch(-bgImageScroll, 0, FRACUNIT, 0, W_CachePatchName("MENUBG1", PU_CACHE), NULL);
 	V_DrawFixedPatch(-bgImageScroll, 0, FRACUNIT, 0, W_CachePatchName(bgImageName, PU_CACHE), NULL);
 
+#ifdef __3DS__
+	// moving letters and MENUBG2 (subtract/add) are drawn by the GPU
+	// (dummy/gpu_present_3ds.c). rr_config: menu_gpu = 0 goes back to CPU without letters.
+	const boolean rr3ds_gpumez = I_3DS_GpuBlendOn();
+	if (rr3ds_gpumez)
+	{
+		I_3DS_GpuBlendPatch(W_CachePatchName("MENUBG2", PU_CACHE));
+		I_3DS_GpuBlendPatch(text1);
+		I_3DS_GpuBlendPatch(text2);
+	}
+#endif
 	V_DrawFixedPatch(0, (BASEVIDHEIGHT + 16) * FRACUNIT, FRACUNIT, V_SUBTRACT, W_CachePatchName("MENUBG2", PU_CACHE), NULL);
 
+#ifdef __3DS__
+	if (rr3ds_blend || rr3ds_gpumez)
+#endif
+	{
 	V_DrawFixedPatch(8 * FRACUNIT, -bgText1Scroll,
 		FRACUNIT, V_SUBTRACT, text1, NULL);
 	V_DrawFixedPatch(8 * FRACUNIT, -bgText1Scroll + text1loop,
@@ -318,6 +368,7 @@ void M_DrawMenuBackground(void)
 		FRACUNIT, V_ADD, text2, NULL);
 	V_DrawFixedPatch(-bgText2Scroll + text2loop, (BASEVIDHEIGHT-8) * FRACUNIT,
 		FRACUNIT, V_ADD, text2, NULL);
+	}
 
 	if (renderdeltatics > 2*FRACUNIT)
 		return; // wipe hitch...
@@ -1819,6 +1870,28 @@ boolean M_DrawCharacterSprite(INT16 x, INT16 y, INT16 skin, UINT8 spr2, UINT8 ro
 	spriteframe_t *sprframe;
 	patch_t *sprpatch;
 
+#ifdef __3DS__
+	// Lazy character: mounting its pk3 blocks ~1 s. Show a yellow "Loading..." first and mount
+	// only after the cursor has stayed ~250 ms on it (and at most one mount per frame), so
+	// scrolling the roster stays smooth.
+	if (R_3DS_SkinIsLazy(skin))
+	{
+		static UINT32 firstSeen[MAXSKINS], lastSeen[MAXSKINS];
+		static UINT8 shown[MAXSKINS];
+		static UINT32 lastMountEnd = 0; // ms; 0 = none yet
+		const UINT32 now = (UINT32)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision());
+		if (now - lastSeen[skin] > 600) { firstSeen[skin] = now; shown[skin] = 0; }
+		lastSeen[skin] = now;
+		if (!shown[skin] || now - firstSeen[skin] < 250 || (lastMountEnd && now - lastMountEnd < 400))
+		{
+			V_DrawCenteredString(x, y - 40, V_YELLOWMAP, "Loading...");
+			shown[skin] = 1;
+			return true;
+		}
+		R_3DS_EnsureSkin(skin);
+		lastMountEnd = (UINT32)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision());
+	}
+#endif
 	spr = P_GetSkinSprite2(skins[skin], spr2, NULL);
 	sprdef = &skins[skin]->sprites[spr];
 
@@ -2489,6 +2562,10 @@ void M_DrawCharacterSelect(void)
 	{
 		priority = setup_animcounter % setup_numplayers;
 	}
+#ifdef __3DS__
+	const precise_t rrCs0 = I_GetPreciseTime();
+	precise_t rrCs1;
+#endif
 
 	{
 		const int kTop = 6;
@@ -2583,6 +2660,9 @@ void M_DrawCharacterSelect(void)
 	}
 
 	// Explosions when you've made your final selection
+#ifdef __3DS__
+	rrCs1 = I_GetPreciseTime();
+#endif
 	M_DrawCharSelectExplosions(true, basex + 82, 22);
 
 	for (i = 0; i < MAXSPLITSCREENPLAYERS; i++)
@@ -2615,6 +2695,24 @@ void M_DrawCharacterSelect(void)
 	{
 		V_DrawCenteredThinString(BASEVIDWIDTH/2, BASEVIDHEIGHT-12, V_30TRANS, "\x85""Double-input problems?\x80 Close Steam, DS4Windows, and other controller wrappers!");
 	}
+#ifdef __3DS__
+	{
+		// [CHARSEL] cost of this screen's draw code (the GPU work happens later, in the present).
+		static double sGrid = 0, sRest = 0;
+		static int sN = 0;
+		const precise_t rrCs2 = I_GetPreciseTime();
+		const double ms = 1000.0 / (double)I_GetPrecisePrecision();
+		sGrid += (double)(rrCs1 - rrCs0) * ms;
+		sRest += (double)(rrCs2 - rrCs1) * ms;
+		if (++sN >= 90)
+		{
+			CONS_Printf("[CHARSEL] draw code avg %.1f ms per frame = icon grid %.1f + previews/cursors %.1f (%d frames, %d skins)\n",
+				(sGrid + sRest) / sN, sGrid / sN, sRest / sN, sN, (int)numskins);
+			sGrid = sRest = 0;
+			sN = 0;
+		}
+	}
+#endif
 }
 
 // DIFFICULTY SELECT
@@ -3924,7 +4022,11 @@ void M_DrawTimeAttack(void)
 				0, W_CachePatchName("K_TEASR3", PU_CACHE)
 			);
 		}
+#ifdef __3DS__
+		else if ((P_3DS_MapPics(map, false, true), minimap = mapheaderinfo[map]->minimapPic))
+#else
 		else if ((minimap = mapheaderinfo[map]->minimapPic))
+#endif
 		{
 			V_DrawScaledPatch(
 				minimapx - (SHORT(minimap->width)/2),
@@ -4078,6 +4180,9 @@ void M_DrawTimeAttack(void)
 
 void M_DrawMasterServerReminder(void)
 {
+#ifdef RR_PCGEN
+	return; // Ring Racers E: with no server list, the "List via <master server>" strip is useless
+#endif
 	// Did you change the Server Browser address? Have a little reminder.
 
 	INT32 mservflags = 0;
@@ -4865,6 +4970,10 @@ static void M_DrawLinkArrow(INT32 x, INT32 y, INT32 i)
 	);
 }
 
+// (PC): where each line ended up in the last draw (for menus that draw extra things, e.g. Advanced Video)
+INT32 M_OptionItemY[M_OPTIONITEMY_MAX];
+INT32 M_OptionItemX;
+
 void M_DrawGenericOptions(void)
 {
 	INT32 x = currentMenu->x - M_EaseWithTransition(Easing_Linear, 5 * 48), y = currentMenu->y, w, i, cursory = -100;
@@ -4873,6 +4982,10 @@ void M_DrawGenericOptions(void)
 	boolean collapse = false;
 	boolean opening = false;
 	fixed_t boxt = 0;
+
+	M_OptionItemX = x;
+	for (i = 0; i < M_OPTIONITEMY_MAX; i++)
+		M_OptionItemY[i] = M_OPTIONITEMY_NONE;
 
 	M_DrawMenuTooltips();
 	M_DrawOptionsMovingButton();
@@ -4948,6 +5061,9 @@ box_found:
 			boxy = 0;
 			opening = false;
 		}
+
+		if (i < M_OPTIONITEMY_MAX && !opening)
+			M_OptionItemY[i] = y;
 
 		if (i == itemOn && !opening)
 		{
@@ -6525,6 +6641,13 @@ void M_DrawPause(void)
 	{
 		V_DrawMenuString(4, 188 + offset/2, V_YELLOWMAP, M_GetGameplayMode());
 	}
+
+#ifdef RR_PCGEN
+	// online host: "<Y> My IP Addresses" at the bottom left. Without a round queue the game mode
+	// is at y=188: the notice goes above it; with a queue the mode moves up (y=167) and the notice goes at the very bottom.
+	if (netgame && server)
+		RRNet_DrawMyIPsHint(4, ((gamestate != GS_INTERMISSION && roundqueue.size > 0) ? 190 : 176) + offset/2, false);
+#endif
 
 	if (drawqueue)
 	{

@@ -256,6 +256,8 @@ void HU_Init(void)
 	Setup fonts
 	*/
 
+// 3DS: fonts are ESSENTIAL (without them any menu/HUD text
+// dereferences NULL patches). They are reloaded; see the memory notes.
 	if (!dedicated)
 	{
 #define  DIM( s, n ) ( font.start = s, font.size = n )

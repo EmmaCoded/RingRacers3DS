@@ -40,7 +40,12 @@ void Obj_ChargeAuraThink (mobj_t *aura)
         player_t *player = mo->player;
 
         // Follow player
+#ifndef __3DS__
         aura->flags &= ~(MF_NOCLIPTHING);
+#else
+		// visual only (no collisions in p_map/p_inter/k_collide): do not check objects when moving it
+		aura->flags |= MF_NOCLIPTHING;
+#endif
 		P_MoveOrigin(aura, mo->x, mo->y, mo->z + mo->height/2);
 		aura->flags |= MF_NOCLIPTHING;
         aura->color = mo->color;

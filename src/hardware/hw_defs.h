@@ -256,6 +256,7 @@ typedef int ETextureFlags;
 #define TF_CHROMAKEYED (0x00000010)
 #define TF_TRANSPARENT (0x00000040)        // texture with some alpha == 0
 #define TF_BRIGHTMAP   (0x00000080)
+#define TF_3DS_ETC     (0x00010000)        // 3DS: already-converted ETC1/ETC1A4 texture (ringracers_3ds_etc.bin)
 
 struct FTextureInfo
 {

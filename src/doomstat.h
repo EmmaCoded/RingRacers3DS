@@ -247,7 +247,13 @@ struct staffsync_t
 	UINT32 rngerror_presync[32];
 	UINT32 rngerror_postsync[32];
 };
-extern staffsync_t staffsync_results[1024];
+// staffsync (developer ghost testing) disabled on 3DS: table of 1 (was 300 KB)
+#ifdef __3DS__
+#define RR_STAFFSYNC_MAX 1
+#else
+#define RR_STAFFSYNC_MAX 1024
+#endif
+extern staffsync_t staffsync_results[RR_STAFFSYNC_MAX];
 
 // ========================================
 // Internal parameters for sound rendering.
@@ -925,8 +931,13 @@ extern mapthing_t *playerstarts[MAXPLAYERS]; // Cooperative
 extern mapthing_t *teamstarts[TEAM__MAX][MAXPLAYERS]; // Teamplay
 extern mapthing_t *faultstart; // Kart Fault
 
+#ifdef __3DS__
+#define TUBEWAYPOINTSEQUENCESIZE 64
+#define NUMTUBEWAYPOINTSEQUENCES 64
+#else
 #define TUBEWAYPOINTSEQUENCESIZE 256
 #define NUMTUBEWAYPOINTSEQUENCES 256
+#endif
 extern mobj_t *tubewaypoints[NUMTUBEWAYPOINTSEQUENCES][TUBEWAYPOINTSEQUENCESIZE];
 extern UINT16 numtubewaypoints[NUMTUBEWAYPOINTSEQUENCES];
 

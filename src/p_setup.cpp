@@ -13,6 +13,10 @@
 /// \brief Do all the WAD I/O, get map description, set up initial state and misc. LUTs
 
 #include <algorithm>
+#ifdef __3DS__
+#include <dirent.h>
+#include <strings.h>
+#endif
 
 #include <fmt/format.h>
 
@@ -25,6 +29,9 @@
 
 #include "p_local.h"
 #include "p_setup.h"
+#ifdef __3DS__
+#include "dummy/i_3ds.h"
+#endif
 #include "p_spec.h"
 #include "p_saveg.h"
 
@@ -128,6 +135,14 @@
 #endif
 
 #include <tracy/tracy/TracyC.h>
+#ifdef __3DS__
+extern "C" void RR3DS_LinMark(const char *paso);
+extern "C" int RR3DS_ArenaVerify(const char *where); // z_zone.cpp
+extern "C" void RR3DS_Preload(void); // pre_3ds.c 
+#endif
+#ifdef __3DS__
+extern "C" void P_3DS_MapPics(INT32 i, boolean thumb, boolean mini);
+#endif
 
 extern "C" consvar_t cv_continuousmusic;
 boolean g_reloadinggamestate = false;
@@ -657,6 +672,15 @@ Ploadflat (levelflat_t *levelflat, const char *flatname, boolean resize)
 		if (( texturenum = R_CheckTextureNumForName(MISSING_TEXTURE) ) != -1)
 			goto texturefound;
 
+#ifdef __3DS__
+		// Without a texture pk3: use the filler texture (index 0) instead of
+		// leave the plane undrawn (white stripes appeared at the top and bottom).
+		if (numtextures > 0)
+		{
+			texturenum = 0;
+			goto texturefound;
+		}
+#endif
 		// nevermind
 		levelflat->type = LEVELFLAT_NONE;
 	}
@@ -1438,11 +1462,34 @@ static void P_LoadThings(UINT8 *data)
 }
 
 // Stores positions for relevant map data spread through a TEXTMAP.
+#ifdef __3DS__
+// 5 x 256 KB of .bss only used while reading TEXTMAP -> temporary heap
+static UINT32 *mapthingsPos, *linesPos, *sidesPos, *vertexesPos, *sectorsPos;
+static void P_3DS_PosFree(void)
+{
+	free(mapthingsPos); free(linesPos); free(sidesPos); free(vertexesPos); free(sectorsPos);
+	mapthingsPos = linesPos = sidesPos = vertexesPos = sectorsPos = NULL;
+}
+static boolean P_3DS_PosAlloc(void)
+{
+	P_3DS_PosFree();
+	const size_t b = UINT16_MAX * sizeof(UINT32);
+	mapthingsPos = (UINT32 *)malloc(b); linesPos = (UINT32 *)malloc(b); sidesPos = (UINT32 *)malloc(b);
+	vertexesPos = (UINT32 *)malloc(b); sectorsPos = (UINT32 *)malloc(b);
+	if (!mapthingsPos || !linesPos || !sidesPos || !vertexesPos || !sectorsPos)
+	{
+		P_3DS_PosFree();
+		I_Error("P_LoadMapData: out of memory reading the TEXTMAP");
+	}
+	return true;
+}
+#else
 UINT32 mapthingsPos[UINT16_MAX];
 UINT32 linesPos[UINT16_MAX];
 UINT32 sidesPos[UINT16_MAX];
 UINT32 vertexesPos[UINT16_MAX];
 UINT32 sectorsPos[UINT16_MAX];
+#endif
 
 // Determine total amount of map data in TEXTMAP.
 static boolean TextmapCount(size_t size)
@@ -3514,8 +3561,14 @@ static boolean P_LoadMapData(const virtres_t *virt)
 	{
 		virtlump_t *textmap = vres_Find(virt, "TEXTMAP");
 		M_TokenizerOpen((char *)textmap->data, textmap->size);
+#ifdef __3DS__
+		P_3DS_PosAlloc();
+#endif
 		if (!TextmapCount(textmap->size))
 		{
+#ifdef __3DS__
+			P_3DS_PosFree();
+#endif
 			M_TokenizerClose();
 			TracyCZoneEnd(__zone);
 			return false;
@@ -3580,6 +3633,9 @@ static boolean P_LoadMapData(const virtres_t *virt)
 	{
 		P_LoadTextmap();
 		M_TokenizerClose();
+#ifdef __3DS__
+		P_3DS_PosFree();
+#endif
 	}
 	else
 	{
@@ -3662,7 +3718,6 @@ static fixed_t P_SegLength(seg_t *seg)
 	return FixedHypot(dx, dy)<<1;
 }
 
-#ifdef HWRENDER
 /** Computes the length of a seg as a float.
   * This is needed for OpenGL.
   *
@@ -3679,7 +3734,6 @@ static inline float P_SegLengthFloat(seg_t *seg)
 
 	return (float)hypot(dx, dy);
 }
-#endif
 
 /** Updates the light offset
   *
@@ -7583,11 +7637,27 @@ static boolean P_LoadMapFromFile(void)
 		P_WriteTextmap();
 
 	// Copy relevant map data for NetArchive purposes.
+#ifdef __3DS__
+	// MEMORY: the copy is only used to send the world state to another player
+	// online (P_NetArchiveWorld, d_clisrv). The 3DS has no online play: a copy is saved
+	// whole copy of sectors+lines+sides (2.9 MB in Sunbeam Paradise Playground).
+	spawnsectors = NULL;
+	spawnlines = NULL;
+	spawnsides = NULL;
+#else
 	P_DeepCopySectors(&spawnsectors, &sectors, numsectors);
 	P_DeepCopyLines(&spawnlines, &lines, numlines);
 	P_DeepCopySides(&spawnsides, &sides, numsides);
+#endif
 
 	P_MakeMapMD5(curmapvirt, &mapmd5);
+
+#ifdef __3DS__
+	// MEMORY: TEXTMAP (CityEscape 4.7 MB) and ZNODES have already been used (and the MD5 is out):
+	// they are released now, before creating objects and loading textures, not at the end of P_SetupLevel.
+	vres_FreeLumpData(curmapvirt, "TEXTMAP");
+	vres_FreeLumpData(curmapvirt, "ZNODES");
+#endif
 
 	TracyCZoneEnd(__zone);
 	return true;
@@ -7836,8 +7906,47 @@ static void P_ResetSpawnpoints(void)
 		skyboxviewpnts[i] = skyboxcenterpnts[i] = NULL;
 }
 
+#ifdef __3DS__
+// 3DS: "Show All" ghosts look for <map>-<skin>-time-best/last/lap-best.lmp for EVERY skin (71) = ~215
+// fopen calls per map load, almost all failing: ~8 s on the SD (measured on console, every map load/reset).
+// The replay folder is listed ONCE and the names are checked in memory.
+static srb2::Vector<srb2::String> s_ghostDir;
+static bool s_ghostDirOk = false;
+
+static void P_ReadGhostDir(const char *dir)
+{
+	s_ghostDir.clear();
+	s_ghostDirOk = false;
+	DIR *d = opendir(dir);
+	if (d)
+	{
+		struct dirent *e;
+		while ((e = readdir(d)) != NULL)
+			s_ghostDir.emplace_back(e->d_name);
+		closedir(d);
+	}
+	s_ghostDirOk = true; // a missing folder = no ghosts at all (empty list)
+}
+
+static bool P_GhostInDir(const char *defdemoname)
+{
+	const char *b = defdemoname;
+	for (const char *c = defdemoname; *c; c++)
+		if (*c == '/' || *c == '\\')
+			b = c + 1;
+	for (const srb2::String &n : s_ghostDir)
+		if (!strcasecmp(n.c_str(), b))
+			return true;
+	return false;
+}
+#endif
+
 static void P_TryAddExternalGhost(const char *defdemoname)
 {
+#ifdef __3DS__
+	if (s_ghostDirOk && !P_GhostInDir(defdemoname))
+		return;
+#endif
 	if (FIL_FileExists(defdemoname))
 	{
 		savebuffer_t buf = {0};
@@ -7862,6 +7971,9 @@ static void P_LoadRecordGhosts(void)
 	INT32 i;
 
 	gpath = Z_StrDup(va("%s" PATHSEP "media" PATHSEP "replay" PATHSEP "%s" PATHSEP "%s", srb2home, timeattackfolder, G_BuildMapName(gamemap)));
+#ifdef __3DS__
+	P_ReadGhostDir(va("%s" PATHSEP "media" PATHSEP "replay" PATHSEP "%s", srb2home, timeattackfolder));
+#endif
 
 	enum
 	{
@@ -7950,6 +8062,10 @@ static void P_LoadRecordGhosts(void)
 		}
 	}
 
+#ifdef __3DS__
+	s_ghostDirOk = false;
+	s_ghostDir.clear();
+#endif
 	Z_Free(gpath);
 }
 
@@ -8245,6 +8361,9 @@ static void P_InitMinimapInfo(void)
 
 	node_t *bsp = &nodes[numnodes-1];
 
+#ifdef __3DS__
+	P_3DS_MapPics(gamemap-1, false, true); // minimap on demand
+#endif
 	minimapinfo.minimap_pic = static_cast<patch_t*>(mapheaderinfo[gamemap-1]->minimapPic);
 
 	minimapinfo.min_x = minimapinfo.max_x = minimapinfo.min_y = minimapinfo.max_y = INT32_MAX;
@@ -8483,8 +8602,12 @@ void P_FreeLevelState(void)
 	{
 		// Queued draws might reference patches or colormaps about to be freed.
 		// Flush 2D to make sure no read-after-free occurs.
+#ifdef __3DS__
+		I_3DS_DiscardTwodee(); // there is no hwr2: discarding what was queued is enough
+#else
 		srb2::rhi::Rhi* rhi = srb2::sys::get_rhi(srb2::sys::g_current_rhi);
 		srb2::sys::main_hardware_state()->twodee_renderer->flush(*rhi, srb2::g_2d);
+#endif
 	}
 
 	G_FreeGhosts(); // ghosts are allocated with PU_LEVEL
@@ -8516,9 +8639,31 @@ boolean P_LoadLevel(boolean fromnetsave, boolean reloadinggamestate)
 	levelloading = true;
 	g_reloadinggamestate = reloadinggamestate;
 
+#ifdef RR_PCGEN
+	// (Ring Racers E): fixed low-end mode for the whole map. Never while watching replays.
+	// online the server decides via the rrnetlowend netvar (it reaches everyone equally, including
+	// whoever joins mid-map: CV_LoadNetVars runs before P_LoadLevel in P_LoadNetGame).
+	{
+		extern int rr_lowend;
+		if (netgame)
+			rr_lowend = cv_rrnetlowend.value ? 1 : 0;
+		else
+			rr_lowend = (cv_rrlowend.value && !demo.playback) ? 1 : 0;
+		I_OutputMsg("[LOWEND] %s on %s\n", rr_lowend ? "ACTIVE" : "off", G_BuildMapName(gamemap));
+	}
+#endif
+
 	// This is needed. Don't touch.
 	maptol = mapheaderinfo[gamemap-1]->typeoflevel;
 
+#ifdef __3DS__
+	// Level loading takes several seconds with nothing on screen: show a yellow Loading...
+	if (rendermode != render_none && !reloadinggamestate)
+	{
+		V_DrawFill(0, 0, BASEVIDWIDTH, BASEVIDHEIGHT, 31);
+		V_DrawCenteredString(BASEVIDWIDTH / 2, BASEVIDHEIGHT / 2 - 4, V_YELLOWMAP, "Loading...");
+	}
+#endif
 	CON_Drawer(); // let the user know what we are going to do
 	I_FinishUpdate(); // page flip or blit buffer
 
@@ -8743,6 +8888,16 @@ boolean P_LoadLevel(boolean fromnetsave, boolean reloadinggamestate)
 			}
 
 			F_RunWipe(wipetype, wipedefs[wipetype], false, ((levelfadecol == 0) ? "FADEMAP1" : "FADEMAP0"), false, false);
+#ifdef __3DS__
+			// The fade to black ends BEFORE the long part of the load (8-30 s): without this the
+			// "Loading..." drawn at the start was only visible during the fade and then it stayed black.
+			if (rendermode != render_none && !reloadinggamestate)
+			{
+				V_DrawFill(0, 0, BASEVIDWIDTH, BASEVIDHEIGHT, 31);
+				V_DrawCenteredString(BASEVIDWIDTH / 2, BASEVIDHEIGHT / 2 - 4, V_YELLOWMAP, "Loading...");
+				I_FinishUpdate();
+			}
+#endif
 
 			// Hold respawn to keep waiting until you're ready
 			if (G_IsModeAttackRetrying() && !demo.playback)
@@ -8842,6 +8997,9 @@ boolean P_LoadLevel(boolean fromnetsave, boolean reloadinggamestate)
 
 	P_InitSlopes(); //Initialize slopes before the map loads.
 
+#ifdef __3DS__
+	RR3DS_ArenaVerify("before loading map"); RR3DS_LinMark("before map");
+#endif
 	if (!P_LoadMapFromFile())
 	{
 		TracyCZoneEnd(__zone);
@@ -8854,6 +9012,9 @@ boolean P_LoadLevel(boolean fromnetsave, boolean reloadinggamestate)
 
 	P_SpawnSlopes(fromnetsave);
 
+#ifdef __3DS__
+	RR3DS_LinMark("before things");
+#endif
 	P_SpawnMapThings(!fromnetsave);
 
 	P_InitMinimapInfo();
@@ -8902,6 +9063,9 @@ boolean P_LoadLevel(boolean fromnetsave, boolean reloadinggamestate)
 
 	// Create plane polygons.
 	if (rendermode == render_opengl)
+#ifdef __3DS__
+		RR3DS_LinMark("before HWR_LoadLevel");
+#endif
 		HWR_LoadLevel();
 #endif
 
@@ -8928,6 +9092,10 @@ boolean P_LoadLevel(boolean fromnetsave, boolean reloadinggamestate)
 		curmapvirt = NULL;
 		vres_Free(temp);
 	}
+#ifdef __3DS__
+	RR3DS_LinMark("before preload");
+	RR3DS_Preload(); RR3DS_LinMark("after preload"); RR3DS_ArenaVerify("map loaded"); // sprites and sounds for this map, all at once (the SD stays idle during the race)
+#endif
 
 	if (!reloadinggamestate)
 	{
@@ -9361,6 +9529,7 @@ UINT8 P_InitMapData(void)
 			if (maplump == wadnamelump)
 				wadnamemap = i+1;
 
+#ifndef __3DS__
 			// Get map thumbnail and minimap
 			virtmap = vres_GetMap(mapheaderinfo[i]->lumpnum);
 			thumbnailPic = vres_Find(virtmap, "PICTURE");
@@ -9389,6 +9558,7 @@ UINT8 P_InitMapData(void)
 			{
 				mapheaderinfo[i]->minimapPic = vres_GetPatch(minimap, PU_STATIC);
 			}
+#endif // !__3DS__
 
 			// Staff ghosts.
 			// The trouble with staff ghosts is that they're too large to cache.
@@ -9933,3 +10103,69 @@ void ReduceVFX_OnChange(void)
 	P_ReduceVFXTextureReload();
 }
 
+
+#ifdef __3DS__
+// MINIATURES (PICTURE) and MINIMAP (MINIMAP) ON DEMAND. Before, they were never loaded
+// on 3DS (memory/time at startup with ~200 maps) -> no minimap or thumbnails.
+// Thumbnails: LRU cache of RR3DS_THUMBS. Minimap: only the current map's.
+// SLOW MENU FIX. Before: a cache of 10 that was emptied in ARRIVAL ORDER. With more than
+// 10 thumbnails on screen (map select, cups, voting) every frame evicted one that
+// was being displayed and loaded another -> every frame decompressed several maps (~1 MB each
+// in maps.pk3) and uploaded textures to the GPU = the menu crawled. Now:
+// 1) LRU: the one that has gone longest without being drawn is evicted (never one used in this tic).
+// 2) At most 1 new load per tic: the rest show blank for a moment and appear on their own.
+#define RR3DS_THUMBS 24
+extern "C" void *W_3DS_GetMapSubPatch(lumpnum_t lumpnum, const char *sub, INT32 tag);
+extern "C" void P_3DS_MapPics(INT32 i, boolean thumb, boolean mini)
+{
+	static INT32 thumbs[RR3DS_THUMBS];
+	static tic_t lastUse[RR3DS_THUMBS];
+	static boolean thumbsInit = false;
+	static tic_t lastLoad = (tic_t)-1;
+	static INT32 curMini = -1;
+	static UINT8 *tried = NULL; static size_t triedN = 0; // 1 = no PICTURE, 2 = no MINIMAP (do not retry)
+	if (!thumbsInit) { for (INT32 k = 0; k < RR3DS_THUMBS; k++) { thumbs[k] = -1; lastUse[k] = 0; } thumbsInit = true; }
+	if (i < 0 || i >= nummapheaders || !mapheaderinfo[i] || mapheaderinfo[i]->lumpnum == LUMPERROR) return;
+	if (triedN < (size_t)nummapheaders) { tried = (UINT8 *)realloc(tried, nummapheaders); if (!tried) { triedN = 0; return; } memset(tried + triedN, 0, nummapheaders - triedN); triedN = nummapheaders; }
+	if (thumb)
+	{
+		const tic_t now = I_GetTime();
+		if (mapheaderinfo[i]->thumbnailPic)
+		{
+			for (INT32 k = 0; k < RR3DS_THUMBS; k++) if (thumbs[k] == i) { lastUse[k] = now; break; }
+		}
+		else if (!(tried[i] & 1) && now != lastLoad)
+		{
+			INT32 slot = 0;
+			for (INT32 k = 1; k < RR3DS_THUMBS; k++)
+				if (thumbs[k] < 0 || (thumbs[slot] >= 0 && lastUse[k] < lastUse[slot])) slot = k;
+			if (thumbs[slot] < 0 || lastUse[slot] != now) // all in use this tic = do not load
+			{
+				const INT32 old = thumbs[slot];
+				if (old >= 0 && old < nummapheaders && mapheaderinfo[old] && mapheaderinfo[old]->thumbnailPic)
+				{
+					Patch_Free(static_cast<patch_t*>(mapheaderinfo[old]->thumbnailPic));
+					mapheaderinfo[old]->thumbnailPic = NULL;
+				}
+				thumbs[slot] = -1;
+				lastLoad = now;
+				mapheaderinfo[i]->thumbnailPic = W_3DS_GetMapSubPatch(mapheaderinfo[i]->lumpnum, "PICTURE", PU_STATIC);
+				if (mapheaderinfo[i]->thumbnailPic) { thumbs[slot] = i; lastUse[slot] = now; }
+				else tried[i] |= 1;
+			}
+		}
+	}
+	if (mini && !mapheaderinfo[i]->minimapPic && !(tried[i] & 2))
+	{
+		if (curMini >= 0 && curMini != i && curMini < nummapheaders && mapheaderinfo[curMini] && mapheaderinfo[curMini]->minimapPic
+			&& minimapinfo.minimap_pic != mapheaderinfo[curMini]->minimapPic)
+		{
+			Patch_Free(static_cast<patch_t*>(mapheaderinfo[curMini]->minimapPic));
+			mapheaderinfo[curMini]->minimapPic = NULL;
+		}
+		mapheaderinfo[i]->minimapPic = W_3DS_GetMapSubPatch(mapheaderinfo[i]->lumpnum, "MINIMAP", PU_STATIC);
+		if (mapheaderinfo[i]->minimapPic) curMini = i; else tried[i] |= 2;
+		CONS_Printf("[MAPPIC] minimap %s: %s\n", G_BuildMapName(i + 1), mapheaderinfo[i]->minimapPic ? "ok" : "NO");
+	}
+}
+#endif

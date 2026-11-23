@@ -48,6 +48,7 @@
 #include "doomstat.h"
 #include "doomtype.h"
 
+#include <sys/stat.h>
 #include "w_wad.h"
 #include "z_zone.h"
 #include "fastcmp.h"
@@ -123,6 +124,116 @@ static void PrintMD5String(const UINT8 *md5, char *buf);
 #endif
 
 // W_Shutdown
+#ifdef __3DS__
+// the real 3DS only lets ~16 files be open at once (FS out of resources: music, the log and server stats were failing).
+// .pk3 files are opened on demand: only RR_MAXWADOPEN stay open (the least recently used is closed).
+#define RR_MAXWADOPEN 4
+static wadfile_t *s_wadlru[RR_MAXWADOPEN]; // [0] = the least recent
+static int s_wadlru_n = 0;
+
+static void W_LruTouch(wadfile_t *w)
+{
+	int i;
+	for (i = 0; i < s_wadlru_n; i++) if (s_wadlru[i] == w) break;
+	if (i < s_wadlru_n) // already there: move it to the end (most recent)
+	{
+		for (; i < s_wadlru_n - 1; i++) s_wadlru[i] = s_wadlru[i + 1];
+		s_wadlru[s_wadlru_n - 1] = w;
+		return;
+	}
+	if (s_wadlru_n == RR_MAXWADOPEN) // full: close the least recent
+	{
+		wadfile_t *old = s_wadlru[0];
+		if (old->handle) { fclose(old->handle); old->handle = NULL; }
+		for (i = 0; i < RR_MAXWADOPEN - 1; i++) s_wadlru[i] = s_wadlru[i + 1];
+		s_wadlru_n--;
+	}
+	s_wadlru[s_wadlru_n++] = w;
+}
+
+// Called when the FS runs out of handles: close every pk3 except the most recently used one
+extern "C" void W_3DS_ReleaseHandles(void)
+{
+	int i;
+	for (i = 0; i < s_wadlru_n - 1; i++)
+		if (s_wadlru[i]->handle) { fclose(s_wadlru[i]->handle); s_wadlru[i]->handle = NULL; }
+}
+
+static FILE *W_WadHandle(wadfile_t *w)
+{
+	if (!w->handle)
+	{
+		w->handle = fopen(w->filename, "rb");
+		if (!w->handle && s_wadlru_n > 0) // out of resources: release the least recent and retry
+		{
+			wadfile_t *old = s_wadlru[0];
+			if (old->handle) { fclose(old->handle); old->handle = NULL; }
+			w->handle = fopen(w->filename, "rb");
+		}
+		if (!w->handle) I_Error("Could not reopen %s", w->filename);
+	}
+	W_LruTouch(w);
+	return w->handle;
+}
+#endif
+
+#ifdef __3DS__
+// Releases a lazily mounted character .pk3: frees every cached patch (and its GPU texture), lump cache,
+// the lump table and the file handle. The slot stays as an empty "stub" (numlumps == 0, name kept) so
+// every other wad number stays valid; trailing stubs are popped, the rest are reused by W_3DS_ReuseStub.
+extern "C" void W_3DS_Unmount(UINT16 wad)
+{
+	wadfile_t *w;
+	UINT16 i;
+	if (wad == 0 || wad >= numwadfiles) return;
+	w = wadfiles[wad];
+	if (!w->numlumps) return; // already a stub
+	for (i = 0; i < w->numlumps; i++)
+	{
+		if (w->patchcache && w->patchcache[i]) Patch_Free(static_cast<patch_t *>(w->patchcache[i]));
+		if (w->lumpcache && w->lumpcache[i]) Z_Free(w->lumpcache[i]);
+	}
+	Z_Free(w->patchcache); // their user pointers (&w->patchcache / &w->lumpcache) become NULL
+	Z_Free(w->lumpcache);
+	for (i = 0; i < s_wadlru_n; i++)
+		if (s_wadlru[i] == w)
+		{
+			for (; i < s_wadlru_n - 1; i++) s_wadlru[i] = s_wadlru[i + 1];
+			s_wadlru_n--;
+			break;
+		}
+	if (w->handle) { fclose(w->handle); w->handle = NULL; }
+	Z_Free(w->lumpinfo[0].longname); // ONE block holds all the names (see ResGetLumpsZip)
+	Z_Free(w->lumpinfo);
+	w->lumpinfo = NULL;
+	w->numlumps = 0;
+	while (numwadfiles > 1 && wadfiles[numwadfiles - 1]->numlumps == 0) // pop the trailing stubs
+	{
+		numwadfiles--;
+		Z_Free(wadfiles[numwadfiles]->filename);
+		Z_Free(wadfiles[numwadfiles]);
+		wadfiles[numwadfiles] = NULL;
+	}
+}
+
+// The wad just mounted is the last one: move it into the first free stub slot (if any) and return its number.
+extern "C" UINT16 W_3DS_ReuseStub(void)
+{
+	UINT16 s, last = (UINT16)(numwadfiles - 1);
+	for (s = 1; s < last; s++)
+		if (wadfiles[s]->numlumps == 0)
+		{
+			Z_Free(wadfiles[s]->filename);
+			Z_Free(wadfiles[s]);
+			wadfiles[s] = wadfiles[last];
+			wadfiles[last] = NULL;
+			numwadfiles--;
+			return s;
+		}
+	return last;
+}
+#endif
+
 // Closes all of the WAD files before quitting
 // If not done on a Mac then open wad files
 // can prevent removable media they are on from
@@ -133,8 +244,11 @@ void W_Shutdown(void)
 	{
 		wadfile_t *wad = wadfiles[numwadfiles];
 
-		fclose(wad->handle);
+		if (wad->handle) fclose(wad->handle);
 		Z_Free(wad->filename);
+#ifdef __3DS__
+		wad->numlumps = 0; // names in a shared block (see ResGetLumpsZip); it comes out the same
+#endif
 		while (wad->numlumps--)
 		{
 			Z_Free(wad->lumpinfo[wad->numlumps].longname);
@@ -698,6 +812,23 @@ static lumpinfo_t* ResGetLumpsZip (FILE* handle, UINT16* nlmp)
 
 	size_t offset = 0;
 
+#ifdef __3DS__
+	// the names (longname + fullname) of ALL lumps go in ONE single block.
+	// Before there were 2 Z_Calloc per lump: 14075 lumps x 2 x ~50 B of header = ~1.4 MB
+	// lost on headers alone (w_wad.cpp:735/738 in [ZOWN]).
+	char *rr_names = NULL;
+	{
+		size_t tot = 0, o2 = 0;
+		for (UINT16 k = 0; k < numlumps && o2 + sizeof(zentry_t) <= (size_t)LONG(zend.cdirsize); k++)
+		{
+			const zentry_t *ze = reinterpret_cast<const zentry_t*>(cdir + o2);
+			tot += 2 * ((size_t)SHORT(ze->namelen) + 1);
+			o2 += sizeof *ze + SHORT(ze->namelen) + SHORT(ze->xtralen) + SHORT(ze->commlen);
+		}
+		rr_names = static_cast<char*>(Z_Calloc(tot + 16, PU_STATIC, NULL));
+	}
+#endif
+
 	for (i = 0; i < numlumps; i++, lump_p++)
 	{
 		zentry_t *zentry = reinterpret_cast<zentry_t*>(cdir + offset);
@@ -732,10 +863,18 @@ static lumpinfo_t* ResGetLumpsZip (FILE* handle, UINT16* nlmp)
 		strncpy(lump_p->name, trimname, std::min(static_cast<std::ptrdiff_t>(8), dotpos - trimname));
 		lump_p->hash = quickncasehash(lump_p->name, 8);
 
+#ifdef __3DS__
+		lump_p->longname = rr_names; rr_names += dotpos - trimname + 1;
+#else
 		lump_p->longname = static_cast<char*>(Z_Calloc(dotpos - trimname + 1, PU_STATIC, NULL));
+#endif
 		strlcpy(lump_p->longname, trimname, dotpos - trimname + 1);
 
+#ifdef __3DS__
+		lump_p->fullname = rr_names; rr_names += SHORT(zentry->namelen) + 1;
+#else
 		lump_p->fullname = static_cast<char*>(Z_Calloc(SHORT(zentry->namelen) + 1, PU_STATIC, NULL));
+#endif
 		strncpy(lump_p->fullname, fullname, SHORT(zentry->namelen));
 
 		switch(SHORT(zentry->compression))
@@ -763,19 +902,84 @@ static lumpinfo_t* ResGetLumpsZip (FILE* handle, UINT16* nlmp)
 		offset += sizeof *zentry + SHORT(zentry->namelen) + SHORT(zentry->xtralen) + SHORT(zentry->commlen);
 	}
 
+#ifdef __3DS__
+	// 3DS: the loop below does 1 fseek + 1 fread on the SD PER LUMP (gfx.pk3 = 12368 lumps = ~17 s,
+	// the Chengi mod = 3095 lumps = 8 s...). The per-lump offset (30 + namelen + xtralen) is cached
+	// in sdmc:/3ds/RingRacers3ds/cache/zip/<hash>.zd; the hash covers the WHOLE central directory
+	// (names, sizes, CRCs, offsets), so any change in the pk3 gives another file.
+	UINT16 *rr_delta = static_cast<UINT16*>(malloc(numlumps * sizeof(UINT16)));
+	bool rr_have = false;
+	char rr_zpath[96] = {0};
+	if (rr_delta)
+	{
+		UINT32 hsh = 2166136261u;
+		const UINT8 *cb = reinterpret_cast<const UINT8*>(cdir);
+		for (UINT32 k = 0, cn = LONG(zend.cdirsize); k < cn; k++)
+			hsh = (hsh ^ cb[k]) * 16777619u;
+		hsh ^= (UINT32)numlumps * 2654435761u;
+		snprintf(rr_zpath, sizeof rr_zpath, "sdmc:/3ds/RingRacers3ds/cache/zip/%08x.zd", (unsigned)hsh);
+		FILE *zf = fopen(rr_zpath, "rb");
+		if (zf)
+		{
+			UINT32 zh[2] = {0, 0};
+			if (fread(zh, sizeof zh, 1, zf) == 1 && zh[0] == 0x31445A52u && zh[1] == (UINT32)numlumps
+				&& fread(rr_delta, sizeof(UINT16), numlumps, zf) == numlumps)
+				rr_have = true;
+			fclose(zf);
+		}
+	}
+#endif
+
 	// Adjust lump position values properly
 	for (i = 0, lump_p = lumpinfo; i < numlumps; i++, lump_p++)
 	{
+#ifdef __3DS__
+		if (rr_have)
+		{
+			lump_p->position += rr_delta[i];
+			continue;
+		}
+#endif
 		// skip and ignore comments/extra fields
 		if ((fseek(handle, lump_p->position, SEEK_SET) != 0) || (fread(&zlentry, 1, sizeof(zlentry_t), handle) < sizeof(zlentry_t)))
 		{
 			CONS_Alert(CONS_ERROR, "Local headers for lump %s are corrupt\n", lump_p->fullname);
+#ifdef __3DS__
+			free(rr_delta);
+#endif
 			Z_Free(lumpinfo);
 			return NULL;
 		}
 
 		lump_p->position += sizeof(zlentry_t) + SHORT(zlentry.namelen) + SHORT(zlentry.xtralen);
+#ifdef __3DS__
+		if (rr_delta)
+			rr_delta[i] = (UINT16)(sizeof(zlentry_t) + SHORT(zlentry.namelen) + SHORT(zlentry.xtralen));
+#endif
 	}
+
+#ifdef __3DS__
+	if (rr_delta)
+	{
+		if (!rr_have && rr_zpath[0])
+		{
+			mkdir("sdmc:/3ds/RingRacers3ds/cache", 0777);
+			mkdir("sdmc:/3ds/RingRacers3ds/cache/zip", 0777);
+			FILE *zf = fopen(rr_zpath, "wb");
+			if (zf)
+			{
+				const UINT32 zh[2] = {0x31445A52u, (UINT32)numlumps};
+				fwrite(zh, sizeof zh, 1, zf);
+				fwrite(rr_delta, sizeof(UINT16), numlumps, zf);
+				fclose(zf);
+				CONS_Printf("[ZIPCACHE] saved %s (%u lumps)\n", rr_zpath, (unsigned)numlumps);
+			}
+		}
+		else if (rr_have)
+			CONS_Printf("[ZIPCACHE] used %s (%u lumps)\n", rr_zpath, (unsigned)numlumps);
+		free(rr_delta);
+	}
+#endif
 
 	*nlmp = numlumps;
 	return lumpinfo;
@@ -819,6 +1023,18 @@ UINT16 W_InitFile(const char *filename, boolean mainfile, boolean startup, const
 #endif
 	UINT8 md5sum[16];
 	int important;
+
+#ifdef __3DS__
+	// staffghosts.pk3 causes OOM on 3DS (1147 lumps, the heaviest pk3
+	// of the set). It is optional content (staff ghost replays for time attack),
+	// does not block normal race/battle. Loading is skipped entirely instead of
+	// fighting over the memory budget. Same criterion as W_VerifyNMUSlumps.
+	if (strstr(filename, "staffghosts.pk3") != NULL)
+	{
+		CONS_Printf("Skipping %s (__3DS__: staff ghosts disabled to avoid OOM)\n", filename);
+		return INT16_MAX;
+	}
+#endif
 
 	if (!(refreshdirmenu & REFRESHDIR_ADDFILE))
 		refreshdirmenu = REFRESHDIR_NORMAL|REFRESHDIR_ADDFILE; // clean out cons_alerts that happened earlier
@@ -864,6 +1080,22 @@ UINT16 W_InitFile(const char *filename, boolean mainfile, boolean startup, const
 	// Let's not add a wad file if the MD5 matches
 	// an MD5 of an already added WAD file!
 	//
+#ifdef __3DS__
+	// A full MD5 of the pk3 costs seconds on the 3DS CPU (a character pk3 took ~1 s of its ~3 s mount).
+	// There is no online play, so a cheap fingerprint (name + size) is enough to detect duplicates.
+	if (!md5expected)
+	{
+		struct stat st;
+		UINT32 h = 2166136261u;
+		const char *c;
+		int k;
+		for (c = filename; *c; c++) h = (h ^ (UINT8)*c) * 16777619u;
+		memset(md5sum, 0, 16);
+		if (stat(filename, &st) == 0) { h ^= (UINT32)st.st_size; h *= 16777619u; }
+		for (k = 0; k < 4; k++) { UINT32 v = h * (UINT32)(k + 1) + 0x9E3779B9u * (UINT32)k; memcpy(md5sum + k * 4, &v, 4); }
+	}
+	else
+#endif
 	W_MakeFileMD5(filename, md5sum);
 
 	if (md5expected)
@@ -974,6 +1206,9 @@ UINT16 W_InitFile(const char *filename, boolean mainfile, boolean startup, const
 	wadfile->important = important;
 	fseek(handle, 0, SEEK_END);
 	wadfile->filesize = (unsigned)ftell(handle);
+#ifdef __3DS__
+	W_LruTouch(wadfile); // limit the .pk3 files open at once
+#endif
 	wadfile->type = type;
 
 	// already generated, just copy it over
@@ -1831,7 +2066,11 @@ size_t W_ReadLumpHeaderPwad(UINT16 wad, UINT16 lump, void *dest, size_t size, si
 	// Let's get the raw lump data.
 	// We setup the desired file handle to read the lump data.
 	l = wadfiles[wad]->lumpinfo + lump;
+#ifdef __3DS__
+	handle = W_WadHandle(wadfiles[wad]); // reopens the .pk3 if it was closed
+#else
 	handle = wadfiles[wad]->handle;
+#endif
 	fseek(handle, (long)(l->position + offset), SEEK_SET);
 
 	// But let's not copy it yet. We support different compression formats on lumps, so we need to take that into account.
@@ -1987,6 +2226,12 @@ void *W_CacheLumpNumPwad(UINT16 wad, UINT16 lump, INT32 tag)
 	lumpcache = wadfiles[wad]->lumpcache;
 	if (!lumpcache[lump])
 	{
+#ifdef __3DS__
+		// who requests an entire lump larger than 1 MB (resolve ra with arm-none-eabi-addr2line)
+		if (W_LumpLengthPwad(wad, lump) > 1024u * 1024u)
+			CONS_Printf("[BIGLUMP] '%s' %u KB tag=%d ra=%p\n", wadfiles[wad]->lumpinfo[lump].fullname ? wadfiles[wad]->lumpinfo[lump].fullname : wadfiles[wad]->lumpinfo[lump].name,
+				(unsigned)(W_LumpLengthPwad(wad, lump) >> 10), (int)tag, __builtin_return_address(0));
+#endif
 		void *ptr = Z_Malloc(W_LumpLengthPwad(wad, lump), tag, &lumpcache[lump]);
 		W_ReadLumpHeaderPwad(wad, lump, ptr, 0, 0);  // read the lump in full
 	}
@@ -2110,6 +2355,9 @@ void *W_CacheLumpName(const char *name, INT32 tag)
 // Cache a patch into heap memory, convert the patch format as necessary
 //
 
+#ifdef __3DS__
+extern "C" int I_3DS_SprFind(const void* lump, size_t len); // r_citro3d.cpp 
+#endif
 static void *MakePatch(void *lumpdata, size_t size, INT32 tag, void *cache)
 {
 	void *ptr, *dest;
@@ -2127,6 +2375,10 @@ static void *MakePatch(void *lumpdata, size_t size, INT32 tag, void *cache)
 	dest = Z_Calloc(sizeof(patch_t), tag, cache);
 
 	Patch_Create(static_cast<softwarepatch_t*>(ptr), len, dest);
+#ifdef __3DS__
+	// sprite precomputed on the PC? (key = CRC32 of the original lump)
+	((patch_t *)dest)->rr3ds_spr = I_3DS_SprFind(lumpdata, size) + 1; // no separate map (saves RAM)
+#endif
 
 	{
 		patch_t* patch = (patch_t*) ptr;
@@ -2142,6 +2394,9 @@ static void *MakePatch(void *lumpdata, size_t size, INT32 tag, void *cache)
 	return dest;
 }
 
+#ifdef __3DS__
+extern "C" void RR3DS_PreNote(int kind, UINT16 wad, UINT16 lump, INT32 tag); // pre_3ds.c 
+#endif
 void *W_CacheSoftwarePatchNumPwad(UINT16 wad, UINT16 lump, INT32 tag)
 {
 	lumpcache_t *lumpcache = NULL;
@@ -2156,6 +2411,9 @@ void *W_CacheSoftwarePatchNumPwad(UINT16 wad, UINT16 lump, INT32 tag)
 		size_t len = W_LumpLengthPwad(wad, lump);
 		void *lumpdata = Z_Malloc(len, PU_STATIC, NULL);
 
+#ifdef __3DS__
+		RR3DS_PreNote('P', wad, lump, tag); // per-map preload list
+#endif
 		// read the lump in full
 		W_ReadLumpHeaderPwad(wad, lump, lumpdata, 0, 0);
 
@@ -2470,6 +2728,10 @@ W_VerifyPK3 (FILE *fp, lumpchecklist_t *checklist, boolean status)
   */
 int W_VerifyNMUSlumps(const char *filename, FILE *handle, boolean exit_on_error)
 {
+#ifdef __3DS__
+	(void)filename; (void)handle; (void)exit_on_error;
+	return 0; // No NMU check on 3DS - no online multiplayer
+#endif
 	lumpchecklist_t NMUSlist[] =
 	{
 		{"O_", 2}, // Digital music
@@ -2721,6 +2983,296 @@ boolean W_ReadShader(const char *filename, size_t *size, void *dest)
 	return true;
 }
 
+#ifdef __3DS__
+// MAP WITHOUT A FULL COPY. The original path caches the whole wad-in-lump (CityEscape
+// 5.7 MB) and AFTERWARDS copies each sub-lump (TEXTMAP 4.7 MB + ZNODES 0.9 MB): peak 11.3 MB for raw data
+// alone -> "Out of memory" on CityEscape and ChaosTube. Here the decompressed lump is walked
+// in 32 KB blocks and each sub-lump is copied straight into its buffer: peak =
+// sub-lumps + compressed (~1 MB). DEFLATE is inflated twice (directory and data) but the
+// compressed data is read from the SD only once. If anything fails, it falls back to the original path.
+typedef boolean (*rr3ds_chunk_fn)(void *ctx, size_t pos, const UINT8 *buf, size_t len); // false = stop
+
+static boolean RR3DS_WalkLump(wadfile_t *wf, const lumpinfo_t *l, const UINT8 *raw, rr3ds_chunk_fn fn, void *ctx)
+{
+	enum { CHUNK = 32768 };
+	static UINT8 buf[CHUNK]; // .bss, no malloc
+	size_t pos = 0;
+
+	if (l->compression == CM_NOCOMPRESSION)
+	{
+		FILE *h = W_WadHandle(wf);
+		size_t leftCount = l->size;
+		if (!h)
+			return false;
+		fseek(h, (long)l->position, SEEK_SET);
+		while (leftCount)
+		{
+			const size_t n = leftCount < CHUNK ? leftCount : CHUNK;
+			if (fread(buf, 1, n, h) != n)
+				return false;
+			if (!fn(ctx, pos, buf, n))
+				return true;
+			pos += n;
+			leftCount -= n;
+		}
+		return true;
+	}
+#ifdef HAVE_ZLIB
+	if (l->compression == CM_DEFLATE && raw)
+	{
+		z_stream strm;
+		int zErr;
+		memset(&strm, 0, sizeof strm);
+		strm.next_in = (Bytef *)raw;
+		strm.avail_in = (uInt)l->disksize;
+		if (inflateInit2(&strm, -15) != Z_OK)
+			return false;
+		do
+		{
+			size_t got;
+			strm.next_out = buf;
+			strm.avail_out = CHUNK;
+			zErr = inflate(&strm, Z_NO_FLUSH);
+			if (zErr != Z_OK && zErr != Z_STREAM_END)
+			{
+				inflateEnd(&strm);
+				return false;
+			}
+			got = CHUNK - strm.avail_out;
+			if (got && !fn(ctx, pos, buf, got))
+				break;
+			pos += got;
+		} while (zErr != Z_STREAM_END);
+		inflateEnd(&strm);
+		return true;
+	}
+#endif
+	return false;
+}
+
+// Copies the bytes of [pos, pos+len) that fall within [off, off+len) of each range.
+struct RR3DS_Range { size_t off, len; UINT8 *dst; };
+struct RR3DS_RangeCtx { RR3DS_Range *r; size_t n, fin, copied; };
+
+static void RR3DS_CopyRange(const RR3DS_Range *r, size_t pos, const UINT8 *buf, size_t len, size_t *copied)
+{
+	const size_t a = r->off, b = r->off + r->len;
+	const size_t p0 = pos > a ? pos : a;
+	const size_t p1 = (pos + len) < b ? (pos + len) : b;
+	if (p0 < p1)
+	{
+		memcpy(r->dst + (p0 - a), buf + (p0 - pos), p1 - p0);
+		*copied += p1 - p0;
+	}
+}
+
+static boolean RR3DS_CopyRanges(void *vctx, size_t pos, const UINT8 *buf, size_t len)
+{
+	RR3DS_RangeCtx *c = (RR3DS_RangeCtx *)vctx;
+	size_t i;
+	for (i = 0; i < c->n; i++)
+		RR3DS_CopyRange(&c->r[i], pos, buf, len, &c->copied);
+	return pos + len < c->fin; // stop once everything has arrived
+}
+
+// Pass 1: the wad header (12 bytes) and, as soon as it is known where it is, the directory.
+struct RR3DS_DirCtx { wadinfo_t cab; RR3DS_Range dir; size_t ndir, copied; boolean cabOk, error; };
+
+static boolean RR3DS_LeeDir(void *vctx, size_t pos, const UINT8 *buf, size_t len)
+{
+	RR3DS_DirCtx *c = (RR3DS_DirCtx *)vctx;
+	if (!c->cabOk)
+	{
+		if (pos != 0 || len < sizeof(wadinfo_t))
+		{
+			c->error = true;
+			return false;
+		}
+		memcpy(&c->cab, buf, sizeof(wadinfo_t));
+		c->ndir = (size_t)LONG(c->cab.numlumps);
+		c->dir.off = (size_t)LONG(c->cab.infotableofs);
+		c->dir.len = c->ndir * sizeof(filelump_t);
+		if (!c->ndir || c->ndir > 4096 || c->dir.off < sizeof(wadinfo_t))
+		{
+			c->error = true;
+			return false;
+		}
+		c->dir.dst = static_cast<UINT8*>(Z_Malloc(c->dir.len, PU_STATIC, NULL));
+		c->cabOk = true;
+	}
+	RR3DS_CopyRange(&c->dir, pos, buf, len, &c->copied);
+	return pos + len < c->dir.off + c->dir.len;
+}
+
+static boolean RR3DS_VresFromWadLump(lumpnum_t lumpnum, virtlump_t **outv, size_t *outn)
+{
+	const UINT16 wad = WADFILENUM(lumpnum), lump = LUMPNUM(lumpnum);
+	wadfile_t *wf = wadfiles[wad];
+	const lumpinfo_t *l = wf->lumpinfo + lump;
+	UINT8 *raw = NULL;
+	RR3DS_DirCtx dc;
+	const filelump_t *dir;
+	RR3DS_Range *ranges = NULL;
+	RR3DS_RangeCtx rc;
+	virtlump_t *vl = NULL;
+	size_t i, n = 0;
+	boolean ok;
+
+	if (l->compression != CM_NOCOMPRESSION && l->compression != CM_DEFLATE)
+		return false;
+	if (l->size < sizeof(wadinfo_t))
+		return false;
+
+	if (l->compression == CM_DEFLATE)
+	{
+		FILE *h = W_WadHandle(wf);
+		if (!h)
+			return false;
+		raw = static_cast<UINT8*>(Z_Malloc(l->disksize, PU_STATIC, NULL));
+		fseek(h, (long)l->position, SEEK_SET);
+		if (fread(raw, 1, l->disksize, h) != l->disksize)
+		{
+			Z_Free(raw);
+			return false;
+		}
+	}
+
+	// Pass 1: directory
+	memset(&dc, 0, sizeof dc);
+	ok = RR3DS_WalkLump(wf, l, raw, RR3DS_LeeDir, &dc);
+	if (!ok || dc.error || !dc.cabOk || dc.copied != dc.dir.len)
+	{
+		CONS_Printf("[MAPDATA]could not read the directory of '%s' (ok=%d err=%d cab=%d %u/%u): old path\n",
+			W_CheckLongNameForNum(lumpnum), ok, dc.error, dc.cabOk, (unsigned)dc.copied, (unsigned)dc.dir.len);
+		if (dc.dir.dst) Z_Free(dc.dir.dst);
+		if (raw) Z_Free(raw);
+		return false;
+	}
+	dir = (const filelump_t *)dc.dir.dst;
+
+	for (i = 0; i < dc.ndir; i++)
+		if (LONG(dir[i].size))
+			n++;
+
+	vl = static_cast<virtlump_t*>(Z_Malloc(sizeof(virtlump_t) * n, PU_LEVEL, NULL));
+	ranges = static_cast<RR3DS_Range*>(Z_Malloc(sizeof(RR3DS_Range) * n, PU_STATIC, NULL));
+	memset(&rc, 0, sizeof rc);
+	rc.r = ranges;
+	for (i = 0, n = 0; i < dc.ndir; i++)
+	{
+		const size_t sz = (size_t)LONG(dir[i].size), off = (size_t)LONG(dir[i].filepos);
+		if (!sz)
+			continue;
+		if (off < sizeof(wadinfo_t) || off + sz > l->size)
+		{
+			CONS_Printf("[MAPDATA]sub-lump %u outside the lump: old path\n", (unsigned)i);
+			while (n--) Z_Free(vl[n].data);
+			Z_Free(vl); Z_Free(ranges); Z_Free(dc.dir.dst);
+			if (raw) Z_Free(raw);
+			return false;
+		}
+		vl[n].size = sz;
+		memcpy(vl[n].name, dir[i].name, 8);
+		vl[n].name[8] = '\0';
+		CONS_Printf("vres_GetMap: sub-lump '%s' (%u bytes) direct\n", vl[n].name, (unsigned)sz);
+		vl[n].data = static_cast<UINT8*>(Z_Malloc(sz, PU_LEVEL, NULL));
+		ranges[n].off = off;
+		ranges[n].len = sz;
+		ranges[n].dst = vl[n].data;
+		if (off + sz > rc.fin)
+			rc.fin = off + sz;
+		n++;
+	}
+	rc.n = n;
+
+	// Pass 2: data of each sub-lump straight into its buffer
+	ok = RR3DS_WalkLump(wf, l, raw, RR3DS_CopyRanges, &rc);
+	Z_Free(ranges);
+	Z_Free(dc.dir.dst);
+	if (raw) Z_Free(raw);
+	if (!ok)
+	{
+		CONS_Printf("[MAPDATA]failed reading the data: old path\n");
+		while (n--) Z_Free(vl[n].data);
+		Z_Free(vl);
+		return false;
+	}
+	*outv = vl;
+	*outn = n;
+	return true;
+}
+
+// reads ONE sub-lump (max 1 MB) of a wad-in-lump without inflating it entirely. Returns Z_Malloc PU_STATIC or NULL.
+static void *RR3DS_LeeSubLump(lumpnum_t lumpnum, const char *sub, size_t *outsz)
+{
+	wadfile_t *wf = wadfiles[WADFILENUM(lumpnum)];
+	const lumpinfo_t *l = wf->lumpinfo + LUMPNUM(lumpnum);
+	UINT8 *raw = NULL;
+	void *data = NULL;
+	RR3DS_DirCtx dc;
+	size_t i;
+
+	if ((l->compression != CM_NOCOMPRESSION && l->compression != CM_DEFLATE) || l->size < sizeof(wadinfo_t))
+		return NULL;
+	if (l->compression == CM_DEFLATE)
+	{
+		FILE *h = W_WadHandle(wf);
+		if (!h)
+			return NULL;
+		raw = static_cast<UINT8*>(Z_Malloc(l->disksize, PU_STATIC, NULL));
+		fseek(h, (long)l->position, SEEK_SET);
+		if (fread(raw, 1, l->disksize, h) != l->disksize)
+		{
+			Z_Free(raw);
+			return NULL;
+		}
+	}
+	memset(&dc, 0, sizeof dc);
+	if (RR3DS_WalkLump(wf, l, raw, RR3DS_LeeDir, &dc) && !dc.error && dc.cabOk && dc.copied == dc.dir.len)
+	{
+		const filelump_t *dir = (const filelump_t *)dc.dir.dst;
+		for (i = 0; i < dc.ndir; i++)
+		{
+			const size_t sz = (size_t)LONG(dir[i].size), off = (size_t)LONG(dir[i].filepos);
+			RR3DS_Range r;
+			RR3DS_RangeCtx rc;
+			if (strncasecmp(dir[i].name, sub, 8))
+				continue;
+			if (!sz || sz > 1024 * 1024 || off < sizeof(wadinfo_t) || off + sz > l->size)
+				break;
+			data = Z_Malloc(sz, PU_STATIC, NULL);
+			r.off = off; r.len = sz; r.dst = static_cast<UINT8*>(data);
+			memset(&rc, 0, sizeof rc);
+			rc.r = &r; rc.n = 1; rc.fin = off + sz;
+			if (!RR3DS_WalkLump(wf, l, raw, RR3DS_CopyRanges, &rc) || rc.copied != sz)
+			{
+				Z_Free(data);
+				data = NULL;
+			}
+			else
+				*outsz = sz;
+			break;
+		}
+	}
+	if (dc.dir.dst) Z_Free(dc.dir.dst);
+	if (raw) Z_Free(raw);
+	return data;
+}
+
+// release the data of an already-used sub-lump (TEXTMAP/ZNODES after the MD5) without waiting for vres_Free.
+void vres_FreeLumpData(virtres_t *vres, const char *name)
+{
+	virtlump_t *vl = vres ? vres_Find(vres, name) : NULL;
+	if (!vl || !vl->data)
+		return;
+	CONS_Printf("[MAPDATA] loose '%s' (%u KB)\n", vl->name, (unsigned)(vl->size >> 10));
+	Z_Free(vl->data);
+	vl->data = NULL;
+	vl->size = 0;
+	vl->name[0] = '\0'; // vres_Find no longer finds it
+}
+#endif
+
 /** \brief Generates a virtual resource used for level data loading.
  *
  * \param lumpnum_t reference
@@ -2740,10 +3292,24 @@ virtres_t* vres_GetMap(lumpnum_t lumpnum)
 		return curmapvirt;
 	}
 
+#ifdef __3DS__
+	if (W_IsLumpWad(lumpnum) && RR3DS_VresFromWadLump(lumpnum, &vlumps, &numlumps))
+	{
+		CONS_Printf("vres_GetMap: '%s' without a whole copy, %u sub-lumps\n",
+			W_CheckLongNameForNum(lumpnum), (unsigned)numlumps);
+	}
+	else
+#endif
 	if (W_IsLumpWad(lumpnum))
 	{
 		UINT32 realentry;
 		size_t *vsizecache;
+
+		// temporary diagnostics to identify which map/wad-in-lump
+		// and which exact sub-lump triggers the OOM.
+		CONS_Printf("vres_GetMap: processing wad-in-lump '%s' from file %s\n",
+			W_CheckLongNameForNum(lumpnum),
+			wadfiles[WADFILENUM(lumpnum)]->filename);
 
 		// Remember that we're assuming that the WAD will have a specific set of lumps in a specific order.
 		UINT8 *wadData = static_cast<UINT8*>(W_CacheLumpNum(lumpnum, PU_LEVEL));
@@ -2773,6 +3339,8 @@ virtres_t* vres_GetMap(lumpnum_t lumpnum)
 			// Play it safe with the name in this case.
 			memcpy(vlumps[i].name, (fileinfo + realentry)->name, 8);
 			vlumps[i].name[8] = '\0';
+			// temporary diagnostics, see above.
+			CONS_Printf("vres_GetMap: sub-lump '%s' (%u bytes)\n", vlumps[i].name, (unsigned)vlumps[i].size);
 			vlumps[i].data = static_cast<UINT8*>(
 				Z_Malloc(vlumps[i].size, PU_LEVEL, NULL) // This is memory inefficient, sorry about that.
 			);
@@ -2868,6 +3436,124 @@ virtlump_t* vres_Find(const virtres_t* vres, const char* name)
  * \return Patch data
  *
  */
+#ifdef __3DS__
+// read ONE sub-lump (PICTURE / MINIMAP) of a wad-in-lump map without loading the map
+// whole (vres_GetMap copies TEXTMAP ~1 MB). For on-demand thumbnails and minimap.
+// PRECOMPUTED THUMBNAILS (tools/make_thumbnails.py -> data/thumbnails_3ds.bin):
+// 80x50 (real size in the menu), uncompressed. Reading one = ~4 KB of the file, without opening the map.
+struct RR3DS_MiniEnt { char name[32]; UINT32 off, size; };
+static FILE *s_miniF = NULL;
+static RR3DS_MiniEnt *s_mini = NULL;
+static UINT32 s_miniN = 0;
+static boolean s_miniTried = false;
+static void *W_3DS_MiniPatch(lumpnum_t lumpnum, INT32 tag)
+{
+	if (!s_miniTried)
+	{
+		s_miniTried = true;
+		s_miniF = fopen("romfs:/thumbnails_3ds.bin", "rb");
+		if (!s_miniF) s_miniF = fopen("sdmc:/3ds/RingRacers3ds/data/thumbnails_3ds.bin", "rb");
+		UINT8 h[12];
+		if (s_miniF && fread(h, 1, 12, s_miniF) == 12 && !memcmp(h, "RRMI", 4))
+		{
+			s_miniN = h[8] | (h[9] << 8) | (h[10] << 16) | ((UINT32)h[11] << 24);
+			s_mini = (RR3DS_MiniEnt *)malloc(s_miniN * sizeof(RR3DS_MiniEnt));
+			if (!s_mini || fread(s_mini, sizeof(RR3DS_MiniEnt), s_miniN, s_miniF) != s_miniN) { free(s_mini); s_mini = NULL; s_miniN = 0; }
+		}
+		CONS_Printf("[MINI] precomputed thumbnails: %u%s\n", (unsigned)s_miniN, s_miniN ? "" : " (no thumbnails_3ds.bin: taken from the map, SLOW)");
+	}
+	if (!s_miniN) return NULL;
+	char nm[40];
+	strlcpy(nm, W_CheckLongNameForNum(lumpnum), sizeof nm);
+	if (char *dot = strrchr(nm, '.')) *dot = 0;
+	for (UINT32 i = 0; i < s_miniN; i++)
+	{
+		if (strncasecmp(s_mini[i].name, nm, 32)) continue;
+		const UINT32 sz = LONG(s_mini[i].size);
+		if (!sz || sz > 64 * 1024) return NULL;
+		void *data = Z_Malloc(sz, PU_STATIC, NULL);
+		void *patch = NULL;
+		if (fseek(s_miniF, (long)LONG(s_mini[i].off), SEEK_SET) == 0 && fread(data, 1, sz, s_miniF) == sz)
+		{
+			patch = MakePatch(data, sz, tag, NULL);
+#ifdef HWRENDER
+			if (patch && rendermode != render_soft && rendermode != render_none)
+				Patch_CreateGL(static_cast<patch_t*>(patch));
+#endif
+		}
+		Z_Free(data);
+		return patch;
+	}
+	return NULL;
+}
+
+extern "C" void *W_3DS_GetMapSubPatch(lumpnum_t lumpnum, const char *sub, INT32 tag)
+{
+	if (lumpnum == LUMPERROR || !W_IsLumpWad(lumpnum)) return NULL;
+	if (!strcasecmp(sub, "PICTURE")) { void *m = W_3DS_MiniPatch(lumpnum, tag); if (m) return m; }
+	// if it is the map being loaded, the sub-lump is already in memory (curmapvirt).
+	if (lumpnum == lastloadedmaplumpnum && curmapvirt != NULL)
+	{
+		virtlump_t *vl = vres_Find(curmapvirt, sub);
+		if (vl && vl->data && vl->size) return vres_GetPatch(vl, tag);
+	}
+	const lumpinfo_t *li = &wadfiles[WADFILENUM(lumpnum)]->lumpinfo[LUMPNUM(lumpnum)];
+	const boolean raw = (li->compression == CM_NOCOMPRESSION);
+	// with DEFLATE, the ENTIRE map wad used to be inflated (CityEscape 5.5 MB) just to
+	// get the MINIMAP (4 KB) -> "Out of memory" at the end of loading. Now it is inflated in
+	// blocks (same as the map loader) and only the requested sub-lump is kept.
+	if (!raw)
+	{
+		size_t sz = 0;
+		void *data = RR3DS_LeeSubLump(lumpnum, sub, &sz);
+		void *p = NULL;
+		if (data)
+		{
+			p = MakePatch(data, sz, tag, NULL);
+#ifdef HWRENDER
+			if (p && rendermode != render_soft && rendermode != render_none)
+				Patch_CreateGL(static_cast<patch_t*>(p));
+#endif
+			Z_Free(data);
+		}
+		if (!p) CONS_Printf("[MAPPIC] %s/%s failed (compressed)\n", W_CheckLongNameForNum(lumpnum), sub);
+		return p;
+	}
+	UINT8 *whole = NULL;
+	wadinfo_t hdr;
+	filelump_t dir[64];
+	if (W_ReadLumpHeader(lumpnum, &hdr, sizeof hdr, 0) != sizeof hdr) return NULL;
+	const INT32 n = LONG(hdr.numlumps), ofs = LONG(hdr.infotableofs);
+	void *patch = NULL;
+	if (n > 0 && n <= 64 && ofs > 0 && (raw || (size_t)ofs + (size_t)n * sizeof(filelump_t) <= li->size))
+	{
+		if (raw) { if (W_ReadLumpHeader(lumpnum, dir, (size_t)n * sizeof(filelump_t), (size_t)ofs) != (size_t)n * sizeof(filelump_t)) goto fin; }
+		else memcpy(dir, whole + ofs, (size_t)n * sizeof(filelump_t));
+		for (INT32 k = 0; k < n; k++)
+		{
+			if (strncasecmp(dir[k].name, sub, 8)) continue;
+			const size_t sz = (size_t)LONG(dir[k].size), pos = (size_t)LONG(dir[k].filepos);
+			if (!sz || sz > 1024 * 1024 || (!raw && pos + sz > li->size)) break;
+			void *data = Z_Malloc(sz, PU_STATIC, NULL);
+			if (raw ? (W_ReadLumpHeader(lumpnum, data, sz, pos) == sz) : (memcpy(data, whole + pos, sz), true))
+			{
+				patch = MakePatch(data, sz, tag, NULL);
+#ifdef HWRENDER
+				if (patch && rendermode != render_soft && rendermode != render_none)
+					Patch_CreateGL(static_cast<patch_t*>(patch));
+#endif
+			}
+			Z_Free(data);
+			break;
+		}
+	}
+fin:
+	if (whole) Z_Free(whole);
+	if (!patch) CONS_Printf("[MAPPIC] %s/%s failed (compressed=%d n=%d)\n", W_CheckLongNameForNum(lumpnum), sub, raw ? 0 : 1, (int)n);
+	return patch;
+}
+#endif
+
 void *vres_GetPatch(virtlump_t *vlump, INT32 tag)
 {
 	patch_t *patch;

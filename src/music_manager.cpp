@@ -18,6 +18,9 @@
 #include <fmt/format.h>
 
 #include "music_manager.hpp"
+#ifdef __3DS__
+#include "rr_config.h"
+#endif
 #include "music_tune.hpp"
 
 #include "core/string.h"
@@ -165,8 +168,17 @@ void TuneManager::pause_unpause() const
 	}
 }
 
+#ifdef __3DS__
+extern "C" boolean I_3DS_LoadSongFile(const char *song); // dummy/i_sound.c 
+#endif
+
 bool TuneManager::load() const
 {
+#ifdef __3DS__
+	// already-converted music (mus/o_<song>.rrm in RomFS), streamed.
+	// The OGG lump is not loaded (there is no decoder and it would waste memory).
+	return I_3DS_LoadSongFile(current_song_.c_str());
+#endif
 	srb2::String lumpstring = srb2::format("O_{}", current_song_);
 	lumpnum_t lumpnum = W_CheckNumForLongName(lumpstring.c_str());
 
@@ -206,6 +218,14 @@ bool TuneManager::resync()
 		return false;
 	}
 
+#ifdef __3DS__
+	// on 3DS the game runs at ~9 tics/s; resync rewound the music almost
+	// every frame (30 ms reading the SD + stuttering music). music_sync=1 brings it back.
+	static int rr_sync = -1;
+	if (rr_sync < 0) rr_sync = RRCfg_Int("music_sync", 0);
+	if (!rr_sync)
+		return false;
+#endif
 	long d_local = I_GetTime() - time_local_;
 	long d_sync = detail::tic_time() - time_sync_;
 

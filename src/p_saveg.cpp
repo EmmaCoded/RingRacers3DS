@@ -2921,6 +2921,10 @@ static void UnArchiveLines(savebuffer_t *save)
 static void P_NetArchiveWorld(savebuffer_t *save)
 {
 	TracyCZone(__zone, true);
+#ifdef __3DS__
+	if (!spawnsectors || !spawnlines || !spawnsides) // no map copy on 3DS (p_setup.cpp)
+		I_Error("Net archive of the world is not available on 3DS (no online)");
+#endif
 
 	// initialize colormap vars because paranoia
 	ClearNetColormaps();
@@ -2937,6 +2941,10 @@ static void P_NetArchiveWorld(savebuffer_t *save)
 static void P_NetUnArchiveWorld(savebuffer_t *save)
 {
 	TracyCZone(__zone, true);
+#ifdef __3DS__
+	if (!spawnsectors || !spawnlines || !spawnsides) // no map copy on 3DS (p_setup.cpp)
+		I_Error("Net archive of the world is not available on 3DS (no online)");
+#endif
 
 	UINT16 i;
 

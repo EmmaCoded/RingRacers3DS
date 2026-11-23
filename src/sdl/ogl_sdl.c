@@ -152,10 +152,17 @@ boolean LoadGL(void)
 
 	\return	if true, changed video mode
 */
+static boolean first_init = false;
+
+// (PC): live API switch: the OpenGL DLL changed, the strings (version, extensions) are read again
+void OglSdlResetInfo(void)
+{
+	first_init = false;
+}
+
 boolean OglSdlSurface(INT32 w, INT32 h)
 {
 	INT32 cbpp = cv_scr_depth.value < 16 ? 16 : cv_scr_depth.value;
-	static boolean first_init = false;
 
 	oglflags = 0;
 

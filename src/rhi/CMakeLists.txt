@@ -7,3 +7,4 @@ target_sources(SRB2SDL2 PRIVATE
 )
 
 add_subdirectory(gl2)
+add_subdirectory(ctr)

@@ -359,8 +359,11 @@ ACSVM::Word Environment::callSpecImpl
 	INT32 args[NUM_SCRIPT_ARGS] = {0};
 
 	char *stringargs[NUM_SCRIPT_STRINGARGS] = {0};
+	// LEAK FIX: [stringargs] used to copy the array HERE (all NULL) and then freed
+	// that empty copy at the end: the strings requested below were never released (PU_STATIC, ~280 KB/min
+	// (in Sunbeam Paradise Playground). By reference it frees the real ones.
 	auto _ = srb2::finally(
-		[stringargs]()
+		[&stringargs]()
 		{
 			for (int i = 0; i < NUM_SCRIPT_STRINGARGS; i++)
 			{

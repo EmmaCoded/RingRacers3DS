@@ -80,6 +80,7 @@
 #include "v_video.h"
 #include "f_finale.h"
 #include "k_hud.h"
+#include "rr_nete.h" // Ring Racers E: online only between E builds, low-end over the network
 
 #ifdef HAVE_DISCORDRPC
 #include "discord.h"
@@ -881,7 +882,11 @@ static inline void CL_DrawConnectionStatus(void)
 			}
 
 			V_DrawCenteredString(BASEVIDWIDTH/2, BASEVIDHEIGHT-58-30, 0,
+#ifdef HAVE_CURL
 				va(M_GetText("%s downloading"), ((cl_mode == CL_DOWNLOADHTTPFILES) ? "\x82""HTTP" : "\x85""Direct")));
+#else // 3DS without curl
+				va(M_GetText("%s downloading"), "\x85""Direct"));
+#endif
 			V_DrawCenteredString(BASEVIDWIDTH/2, BASEVIDHEIGHT-58-22, V_YELLOWMAP,
 				va(M_GetText("\"%s\""), tempname));
 			V_DrawString(BASEVIDWIDTH/2-128, BASEVIDHEIGHT-58, V_20TRANS|V_MONOSPACE,
@@ -966,7 +971,7 @@ static boolean CL_SendJoin(void)
 	netbuffer->u.clientcfg.packetversion = PACKETVERSION;
 	netbuffer->u.clientcfg.version = VERSION;
 	netbuffer->u.clientcfg.subversion = SUBVERSION;
-	strncpy(netbuffer->u.clientcfg.application, SRB2APPLICATION,
+	strncpy(netbuffer->u.clientcfg.application, RR_NETAPP,
 			sizeof netbuffer->u.clientcfg.application);
 
 	for (i = 0; i <= splitscreen; i++)
@@ -1060,6 +1065,10 @@ static boolean CL_SendJoin(void)
 		memcpy(&netbuffer->u.clientcfg.challengeResponse[i], signature, sizeof(signature));
 	}
 
+#ifdef RR_PCGEN
+	netbuffer->u.clientcfg.rrlowend = cv_rrlowend.value ? 1 : 0; // the E server decides based on this
+#endif
+
 	return HSendPacket(servernode, false, 0, sizeof (clientconfig_pak));
 }
 
@@ -1088,7 +1097,11 @@ static void SV_SendServerInfo(INT32 node, tic_t servertime)
 	netbuffer->u.serverinfo.packetversion = PACKETVERSION;
 
 	netbuffer->u.serverinfo.version = VERSION;
+#ifdef RR_PCGEN
+	netbuffer->u.serverinfo.subversion = RR_NETINFO_SUBVERSION; // (see doomdef.h)
+#else
 	netbuffer->u.serverinfo.subversion = SUBVERSION;
+#endif
 
 	memcpy(netbuffer->u.serverinfo.commit,
 			comprevision_abbrev_bin, GIT_SHA_ABBREV);
@@ -1120,6 +1133,9 @@ static void SV_SendServerInfo(INT32 node, tic_t servertime)
 		(gamespeed & SV_SPEEDMASK) |
 		(dedicated ? SV_DEDICATED : 0) |
 		(cv_voice_allowservervoice.value ? SV_VOICEENABLED : 0)
+#ifdef RR_PCGEN
+		| SV_RRE | (cv_rrnetlowend.value ? SV_RRLOWEND : 0) // Ring Racers E
+#endif
 	);
 
 	D_ParseCarets(netbuffer->u.serverinfo.servername, cv_servername.string, MAXSERVERNAME);
@@ -1646,11 +1662,20 @@ static boolean SL_InsertServer(serverinfo_pak* info, SINT8 node)
 		if (info->version != VERSION)
 			return false; // Not same version.
 
+#ifdef RR_PCGEN
+		if (info->subversion != RR_NETINFO_SUBVERSION)
+#else
 		if (info->subversion != SUBVERSION)
+#endif
 			return false; // Close, but no cigar.
 
 		if (strcmp(info->application, SRB2APPLICATION))
 			return false; // that's a different mod
+
+#ifdef RR_PCGEN
+		if (!(info->kartvars & SV_RRE))
+			return false; // original Ring Racers (not E): it cannot play with this one
+#endif
 	}
 
 	const INT32 gtidentifier = G_GetGametypeByName(info->gametypename);
@@ -1946,6 +1971,16 @@ static boolean CL_ServerConnectionSearchTicker(tic_t *asksent)
 {
 	INT32 i;
 
+#ifdef RR_PCGEN
+	// The server we joined by IP is not Ring Racers E
+	if (client && RRNet_WrongServer())
+	{
+		Command_ExitGame_f();
+		RRNet_ShowWrongServer();
+		return false;
+	}
+#endif
+
 	// serverlist is updated by GetPacket function
 	if (serverlistcount > 0)
 	{
@@ -1968,6 +2003,11 @@ static boolean CL_ServerConnectionSearchTicker(tic_t *asksent)
 		{
 			serverisfull = true;
 		}
+
+#ifdef RR_PCGEN
+		if (client) // warn on join if the server's low-end setting does not match ours
+			RRNet_ClientFoundServer((serverlist[i].info.kartvars & SV_RRLOWEND) ? 1 : 0);
+#endif
 
 		if (client)
 		{
@@ -2577,6 +2617,10 @@ static void ResetNode(INT32 node);
 static void RecreatePlayerOpusDecoder(INT32 playernum)
 {
 	// Destroy and recreate the opus decoder for this playernum
+#ifdef __3DS__
+	g_player_opus_decoders[playernum] = NULL;
+	return; // no voice chat on 3DS
+#endif
 	OpusDecoder *opusdecoder = g_player_opus_decoders[playernum];
 	if (opusdecoder)
 	{
@@ -3549,6 +3593,9 @@ void D_ClientServerInit(void)
 
 static void ResetNode(INT32 node)
 {
+#ifdef RR_PCGEN
+	RRNet_SetNodeLowEnd(node, 0);
+#endif
 	nodeingame[node] = false;
 	nodewaiting[node] = 0;
 	nodeneedsauth[node] = false;
@@ -3741,6 +3788,9 @@ static void InitializeLocalVoiceDenoiser(void)
 static void InitializeLocalVoiceEncoder(void)
 {
 	// Reset voice opus encoder for local "player 1"
+#ifdef __3DS__
+	return; // no voice chat on 3DS
+#endif
 	OpusEncoder *encoder = g_local_opus_encoder;
 	if (encoder != NULL)
 	{
@@ -4150,6 +4200,11 @@ static boolean SV_AddWaitingPlayers(SINT8 node, UINT8 *availabilities, player_co
 
 			playerpernode[node]++;
 
+#ifdef RR_PCGEN
+			// BEFORE XD_ADDPLAYER (same buffer, same order): flag whether this low-end player
+			// must wait as a spectator until the round ends (the host is not in low-end mode yet)
+			RRNet_BeforeAddPlayer(node, newplayernum);
+#endif
 			SendNetXCmd(XD_ADDPLAYER, buf, buf_p - buf);
 			DEBFILE(va("Server added player %d node %d\n", newplayernum, node));
 		}
@@ -4299,13 +4354,18 @@ boolean SV_SpawnServer(void)
 				I_NetOpenSocket();
 			}
 
+#ifndef RR_PCGEN // Ring Racers E: direct connection only (never listed on the original Ring Racers public list)
 			if (cv_advertise.value)
 			{
 				RegisterServer();
 			}
+#endif
 
 			ourIP = 0;
 			STUN_bind(GotOurIP);
+#ifdef RR_PCGEN
+			RRNet_ServerStart(); // match low-end mode = the host's
+#endif
 		}
 
 		// non dedicated server just connect to itself
@@ -4530,10 +4590,15 @@ static void HandleConnect(SINT8 node)
 	{
 		SV_SendRefuse(node, "Incompatible packet formats.");
 	}
-	else if (strncmp(netbuffer->u.clientcfg.application, SRB2APPLICATION,
+	else if (strncmp(netbuffer->u.clientcfg.application, RR_NETAPP,
 				sizeof netbuffer->u.clientcfg.application))
 	{
+#ifdef RR_PCGEN
+		// The original Ring Racers (or another mod) is trying to join a Ring Racers E game
+		SV_SendRefuse(node, "This is a Ring Racers E game.\nOnly Ring Racers E can join\n(its files and game logic differ).");
+#else
 		SV_SendRefuse(node, "Different Ring Racers modifications\nare not compatible.");
+#endif
 	}
 	else if (netbuffer->u.clientcfg.version != VERSION
 		|| netbuffer->u.clientcfg.subversion != SUBVERSION)
@@ -4668,6 +4733,9 @@ static void HandleConnect(SINT8 node)
 
 		// client authorised to join
 		nodewaiting[node] = (UINT8)(netbuffer->u.clientcfg.localplayers - playerpernode[node]);
+#ifdef RR_PCGEN
+		RRNet_SetNodeLowEnd(node, node ? netbuffer->u.clientcfg.rrlowend : 0); // (the host decides through its own option)
+#endif
 		if (!nodeingame[node])
 		{
 			gamestate_t backupstate = gamestate;
@@ -4774,6 +4842,12 @@ static void HandleServerInfo(SINT8 node)
 	netbuffer->u.serverinfo.gametypename
 		[sizeof netbuffer->u.serverinfo.gametypename - 1] = '\0';
 	D_SanitizeKeepColors(netbuffer->u.serverinfo.servername, netbuffer->u.serverinfo.servername, MAXSERVERNAME);
+
+#ifdef RR_PCGEN
+	// Connecting by IP to a server that is NOT Ring Racers E -> warn instead of waiting for the timeout
+	if (client && cl_mode == CL_SEARCHING && node == servernode)
+		RRNet_CheckServerInfo(&netbuffer->u.serverinfo);
+#endif
 
 	// If we have cause to reject it, it's not worth observing.
 	if (
@@ -5391,6 +5465,9 @@ static void PT_HandleVoiceClient(SINT8 node, boolean isserver)
 	UINT32 framesize = doomcom->datalength - BASEPACKETSIZE - sizeof(voice_pak);
 	UINT8 *frame = (UINT8*)(pl) + sizeof(voice_pak);
 
+#ifdef __3DS__
+	return; // no voice chat on 3DS
+#endif
 	OpusDecoder *decoder = g_player_opus_decoders[playernum];
 	if (decoder == NULL)
 	{
@@ -6812,11 +6889,23 @@ static void SV_Maketic(void)
 	maketic++;
 }
 
+#ifdef __3DS__
+static precise_t rr_acc_tic, rr_acc_gtick;
+UINT64 rr3ds_m_gtick = 0; // [METER]: time inside G_Ticker
+static UINT32 rr_acc_ntic;
+extern precise_t rr_t_ptick, rr_t_hu, rr_t_st, rr_t_pre, rr_t_spec, rr_t_inv, rr_t_vote;
+#endif
+
 boolean TryRunTics(tic_t realtics)
 {
 	boolean ticking;
 
 	// the machine has lagged but it is not so bad
+#ifdef __3DS__
+	// No online play; let up to 11 tics run per frame (real-time speed) instead of 1
+	if (realtics > TICRATE/3)
+		realtics = TICRATE/3;
+#else
 	if (realtics > TICRATE/7) // FIXME: consistency failure!!
 	{
 		if (server)
@@ -6824,6 +6913,7 @@ boolean TryRunTics(tic_t realtics)
 		else
 			realtics = TICRATE/7;
 	}
+#endif
 
 	if (singletics)
 		realtics = 1;
@@ -6941,7 +7031,13 @@ boolean TryRunTics(tic_t realtics)
 					R_UpdateViewInterpolation();
 				}
 
+#ifdef __3DS__
+					{ precise_t rr_g0 = I_GetPreciseTime();
+					G_Ticker(run);
+					{ precise_t d = I_GetPreciseTime() - rr_g0; rr_acc_gtick += d; rr3ds_m_gtick += d; } }
+#else
 				G_Ticker(run);
+#endif
 			}
 
 			if (Playing() && netgame && (gametic % TICRATE == 0))
@@ -6958,6 +7054,16 @@ boolean TryRunTics(tic_t realtics)
 			consistancy[gametic % BACKUPTICS] = Consistancy();
 
 			ps_tictime = I_GetPreciseTime() - ps_tictime;
+#ifdef __3DS__
+				rr_acc_tic += ps_tictime; rr_acc_ntic++;
+				if (rr_acc_ntic >= 175)
+				{
+					const double us = 1000000.0 / (double)I_GetPrecisePrecision() / rr_acc_ntic;
+					CONS_Printf("[TICFULL] us/tic: total=%.0f G_Ticker=%.0f outside_G_Ticker=%.0f | P_Ticker_full=%.0f HU=%.0f ST=%.0f pre=%.0f rest_post=%.0f\n",rr_acc_tic * us, rr_acc_gtick * us, (rr_acc_tic - rr_acc_gtick) * us, rr_t_ptick * us, rr_t_hu * us, rr_t_st * us, rr_t_pre * us, (rr_acc_gtick - rr_t_ptick - rr_t_hu - rr_t_st - rr_t_pre) * us);
+					CONS_Printf("[TICFULL2] spec=%.0f invmusic=%.0f midvote=%.0f\n", rr_t_spec * us, rr_t_inv * us, rr_t_vote * us);
+					rr_acc_tic = rr_acc_gtick = rr_t_ptick = rr_t_hu = rr_t_st = rr_t_pre = rr_t_spec = rr_t_inv = rr_t_vote = 0; rr_acc_ntic = 0;
+				}
+#endif
 
 			// Leave a certain amount of tics present in the net buffer as long as we've ran at least one tic this frame.
 			if (client && gamestate == GS_LEVEL && leveltime > 1 && neededtic <= gametic + cv_netticbuffer.value)
@@ -7408,6 +7514,10 @@ void NetUpdate(void)
 	nowtime = I_GetTime();
 	realtics = nowtime - gametime;
 
+#ifdef RR_PCGEN
+	RRNet_Update(); // match low-end (server) and join notices (client)
+#endif
+
 	if (!demo.playback && g_fast_forward > 0)
 	{
 		realtics = 1;
@@ -7417,6 +7527,12 @@ void NetUpdate(void)
 		if (realtics <= 0) // nothing new to update
 			return;
 
+#ifdef __3DS__
+		// No online play: at <7 fps a frame lasts >5 tics and the original rule
+		// (server -> 1 tic) dropped about half of the game time. Same cap as TryRunTics.
+		if (realtics > TICRATE/3)
+			realtics = TICRATE/3;
+#else
 		if (realtics > 5)
 		{
 			if (server)
@@ -7424,6 +7540,7 @@ void NetUpdate(void)
 			else
 				realtics = 5;
 		}
+#endif
 	}
 
 #ifdef DEDICATEDIDLETIME
@@ -7593,6 +7710,9 @@ void NetVoiceUpdate(void)
 	UINT8 *encoded = NULL;
 	float *subframe_buffer = NULL;
 	float *denoise_buffer = NULL;
+#ifdef __3DS__
+	return; // no voice chat on 3DS
+#endif
 	ps_voiceupdatetime = I_GetPreciseTime();
 
 	if (dedicated)

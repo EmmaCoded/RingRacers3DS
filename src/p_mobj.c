@@ -12,7 +12,9 @@
 /// \file  p_mobj.c
 /// \brief Moving object handling. Spawn functions
 
+#define RR_P_MOBJ_C // the regular version of P_MobjWasRemoved lives here
 #include "d_think.h"
+#include "rr_config.h" // RR_LOWEND (PC low-end mode)
 #include "dehacked.h"
 #include "doomdef.h"
 #include "g_game.h"
@@ -59,6 +61,15 @@ actioncache_t actioncachehead;
 
 static mobj_t *overlaycap = NULL;
 mobj_t *waypointcap = NULL;
+
+#ifdef RR_LOWEND_CODE
+// MK7: diagnostic counters (printed and reset in p_tick.c every 175 tics).
+UINT32 rr3ds_mk7_ringFast = 0;   // idle rings through the fast path
+UINT32 rr3ds_mk7_floatSkip = 0;  // floaters without ZMovement+CheckPosition (P_MobjThinker)
+UINT32 rr3ds_mk7_scenSkip = 0;   // floaters without ZMovement+CheckPosition (P_SceneryThinker)
+UINT32 rr3ds_mk7_capsNoLink = 0; // capsule pieces moved without relinking
+UINT32 rr3ds_mk7_tripSkip = 0;   // invisible TRIPWIREAPPROACH without P_MoveOrigin
+#endif
 
 // Used as a fast iterator to certain objects that help bot
 // AI, need HUD tracking or appear on the minimap. It's pretty
@@ -195,6 +206,40 @@ static void P_CycleMobjState(mobj_t *mobj)
 	}
 }
 
+#ifdef RR_LOWEND_CODE
+// SLEEPING RING. An idle ring (RR3DS_RingIdle) with the global animation
+// S_RING does nothing per tic except change frame, which depends only on leveltime.
+// It is flagged thinker.rr3ds_sleep: P_RunThinkers skips it (1 of every 8 tics it is checked anyway
+// checks for safety) and the frame is computed when drawing. It wakes up when changing
+// state change, when it is removed and when the magnet (PIT_AttractingRings) touches it.
+UINT32 rr3ds_ringSlept = 0;
+int rr3ds_flingNoCol = 1; // fling_nocol=0 in rr_config.txt turns it off (p_tick.c reads it)
+static boolean RR3DS_PlayerNear(mobj_t *mobj);
+UINT32 rr3ds_farSlept = 0; // how many objects slept/were deleted due to distance
+int rr3ds_farSleepOn = 1;  // far_sleep=0 in rr_config.txt turns it off
+int rr3ds_ringSleepOn = 1; // sleeping rings: 0 in rr_config.txt (sleeping_rings) turns it off (p_tick.c reads it on load)
+
+void RR3DS_RingSyncFrame(mobj_t *mobj)
+{
+	const state_t *st = mobj->state;
+	if (st && (st->frame & FF_ANIMATE) && (st->frame & FF_GLOBALANIM) && st->var2 > 0 && st->var1 >= 0)
+	{
+		mobj->frame = (mobj->frame & ~FF_FRAMEMASK)
+			| ((st->frame & FF_FRAMEMASK) + (UINT32)((leveltime / st->var2) % (st->var1 + 1)));
+		mobj->anim_duration = (UINT16)(st->var2 - (leveltime % st->var2));
+	}
+}
+
+void RR3DS_RingWake(mobj_t *mobj)
+{
+	if (mobj->thinker.rr3ds_sleep)
+	{
+		mobj->thinker.rr3ds_sleep = 0;
+		RR3DS_RingSyncFrame(mobj);
+	}
+}
+#endif
+
 //
 // P_CycleMobjState for players.
 //
@@ -222,6 +267,9 @@ static void P_CyclePlayerMobjState(mobj_t *mobj)
 //
 // Separate from P_SetMobjState because of the flashing check and Super states
 //
+// also lower "recursion" on early exit (bug in the original: it stayed >0 forever
+// and every state change cleared the whole tempstate, ~28 KB = ~90 us on 3DS).
+#define RR_SEENSTATE_EXIT() do { if (!--recursion) for (;(state = seenstate[i]) > S_NULL; i = state - 1) seenstate[i] = S_NULL; } while (0)
 boolean P_SetPlayerMobjState(mobj_t *mobj, statenum_t state)
 {
 	state_t *st;
@@ -298,6 +346,7 @@ boolean P_SetPlayerMobjState(mobj_t *mobj, statenum_t state)
 		{ // Bad SOC!
 			CONS_Alert(CONS_ERROR, "Cannot remove player mobj by setting its state to S_NULL.\n");
 			//P_RemoveMobj(mobj);
+			RR_SEENSTATE_EXIT();
 			return false;
 		}
 
@@ -347,7 +396,11 @@ boolean P_SetPlayerMobjState(mobj_t *mobj, statenum_t state)
 					{
 						if (mobj->frame & FF_FRAMEMASK)
 							mobj->frame--;
-						return P_SetPlayerMobjState(mobj, st->var1);
+						{
+							boolean r = P_SetPlayerMobjState(mobj, st->var1);
+							RR_SEENSTATE_EXIT();
+							return r;
+						}
 					}
 				}
 				else
@@ -381,7 +434,10 @@ boolean P_SetPlayerMobjState(mobj_t *mobj, statenum_t state)
 			// woah. a player was removed by an action.
 			// this sounds like a VERY BAD THING, but there's nothing we can do now...
 			if (P_MobjWasRemoved(mobj))
+			{
+				RR_SEENSTATE_EXIT();
 				return false;
+			}
 		}
 
 		seenstate[state] = 1 + st->nextstate;
@@ -409,6 +465,10 @@ boolean P_SetMobjState(mobj_t *mobj, statenum_t state)
 	statenum_t *seenstate = seenstate_tab; // pointer to table
 	static INT32 recursion; // detects recursion
 	statenum_t i = state; // initial state
+
+#ifdef RR_LOWEND_CODE
+	RR3DS_RingWake(mobj);
+#endif
 	statenum_t tempstate[NUMSTATES]; // for use with recursion
 
 #ifdef PARANOIA
@@ -423,6 +483,7 @@ boolean P_SetMobjState(mobj_t *mobj, statenum_t state)
 	{
 		if (state == S_NULL)
 		{
+			RR_SEENSTATE_EXIT();
 			P_RemoveMobj(mobj);
 			return false;
 		}
@@ -473,7 +534,11 @@ boolean P_SetMobjState(mobj_t *mobj, statenum_t state)
 					{
 						if (mobj->frame & FF_FRAMEMASK)
 							mobj->frame--;
-						return P_SetMobjState(mobj, st->var1);
+						{
+							boolean r = P_SetMobjState(mobj, st->var1);
+							RR_SEENSTATE_EXIT();
+							return r;
+						}
 					}
 				}
 				else
@@ -502,7 +567,10 @@ boolean P_SetMobjState(mobj_t *mobj, statenum_t state)
 			astate = st;
 			st->action.acp1(mobj);
 			if (P_MobjWasRemoved(mobj))
+			{
+				RR_SEENSTATE_EXIT();
 				return false;
+			}
 		}
 
 		seenstate[state] = 1 + st->nextstate;
@@ -4436,6 +4504,40 @@ static void P_ItemCapsulePartThinker(mobj_t *mobj)
 
 		// rotate & move to capsule
 		mobj->angle += mobj->movedir;
+#ifdef RR_LOWEND_CODE
+		if (RR_LOWEND) {
+		// RR3DS: decorative piece (NOCLIP/NOBLOCKMAP/NOGRAVITY): only relink,
+		// without P_CheckPosition (the expensive part). No RNG -> replays intact.
+		if (!(mobj->flags2 & MF2_CLASSICPUSH))
+		{
+			x += P_ReturnThrustX(mobj, mobj->angle + ANGLE_90, mobj->radius);
+			y += P_ReturnThrustY(mobj, mobj->angle + ANGLE_90, mobj->radius);
+		}
+		if (x != mobj->x || y != mobj->y)
+		{
+			// MK7: without blockmap and same subsector -> only change x/y/z, without
+			// Unset/SetThingPosition (P_CreateSecNodeList was the expensive part).
+			if ((mobj->flags & MF_NOBLOCKMAP) && mobj->subsector != NULL
+				&& R_PointInSubsector(x, y) == mobj->subsector)
+			{
+				mobj->x = x;
+				mobj->y = y;
+				mobj->z = z;
+				rr3ds_mk7_capsNoLink++;
+			}
+			else
+			{
+				P_UnsetThingPosition(mobj);
+				mobj->x = x;
+				mobj->y = y;
+				mobj->z = z;
+				P_SetThingPosition(mobj);
+			}
+		}
+		else
+			mobj->z = z;
+		} else
+#endif
 		if (mobj->flags2 & MF2_CLASSICPUSH) // centered
 			P_MoveOrigin(mobj, x, y, z);
 		else
@@ -5627,6 +5729,27 @@ void P_RunOverlays(void)
 			mo->dispoffset++;
 		}
 
+#ifdef RR_LOWEND_CODE
+		// the overlay goes EXACTLY where its owner is: if it is already in the same sector only the
+		// coordinates are copied (no relink or P_CheckPosition). "Underlay" ones (var1) still go the normal way
+		// because their order in the sector list matters when drawing.
+		if (RR_LOWEND && !mo->state->var1 && mo->subsector != NULL && mo->target->subsector != NULL
+			&& mo->subsector->sector == mo->target->subsector->sector)
+		{
+			mo->x = destx;
+			mo->y = desty;
+			mo->radius = mo->target->radius;
+			mo->height = mo->target->height;
+			if (mo->eflags & MFE_VERTICALFLIP)
+				mo->z = (mo->target->z + mo->target->height - mo->height) - zoffs;
+			else
+				mo->z = mo->target->z + zoffs;
+			mo->subsector = mo->target->subsector;
+			mo->floorz = mo->target->floorz;
+			mo->ceilingz = mo->target->ceilingz;
+			continue;
+		}
+#endif
 		P_UnsetThingPosition(mo);
 		mo->x = destx;
 		mo->y = desty;
@@ -6476,6 +6599,17 @@ static void P_MobjSceneryThink(mobj_t *mobj)
 				break;
 			}
 
+#ifdef RR_LOWEND_CODE
+			// idle capsule and piece (84 pieces = 5.7 ms per tic in the prison):
+			// do not recompute the position every tic; it is recomputed 1 of every 8 tics.
+			if (RR_LOWEND && (leveltime & 7)
+				&& !owner->momx && !owner->momy && !owner->momz
+				&& !mobj->momx && !mobj->momy && !mobj->momz
+				&& owner->scale == owner->destscale && mobj->scale == owner->scale
+				&& mobj->tics <= 0 && mobj->fuse == 0 && mobj->hitlag == 0 && owner->hitlag == 0)
+				return;
+#endif
+
 			newx = owner->x;
 			newy = owner->y;
 			newz = P_GetMobjFeet(owner);
@@ -7222,6 +7356,17 @@ static boolean P_MobjRegularThink(mobj_t *mobj)
 	case MT_FLINGRING:
 		if (P_MobjWasRemoved(mobj))
 			return false;
+#ifdef RR_LOWEND_CODE
+		// ring flying with no player nearby: does not check collisions with objects (nobody
+		// can grab it there). With a player nearby or a magnet (tracer) it goes back to normal.
+		if (RR_LOWEND && rr3ds_flingNoCol)
+		{
+			if (mobj->tracer == NULL && !RR3DS_PlayerNear(mobj))
+				mobj->flags |= MF_NOCLIPTHING;
+			else
+				mobj->flags &= ~MF_NOCLIPTHING;
+		}
+#endif
 
 		A_AttractChase(mobj);
 		break;
@@ -8008,9 +8153,18 @@ static boolean P_MobjRegularThink(mobj_t *mobj)
 		player_t *player = target->player;
 		fixed_t myspeed = (player->speed);
 		boolean In_A_Race = ((gametyperules & GTR_CIRCUIT) && !K_Cooperative() && M_NotFreePlay() && !modeattacking); // If you're in a real race.
+#ifdef RR_LOWEND_CODE
+		// MK7: base speed and threshold are computed ONCE (before 2+2 calls; they are pure functions).
+		const fixed_t rr3ds_kartspeed = K_GetKartSpeed(player, false, false);
+		const fixed_t rr3ds_thresh = K_PlayerTripwireSpeedThreshold(player);
+		boolean prorated_sonicboom_alert = (rr3ds_thresh > (9 * rr3ds_kartspeed/4)); // If you're being prorated, aka above 225%
+		fixed_t maxspeed = rr3ds_thresh; // Centered at this speed.
+		fixed_t minspeed = max(2 * maxspeed / 4, 7 * rr3ds_kartspeed / 5); // Starts appearing at this speed.
+#else
 		boolean prorated_sonicboom_alert = (K_PlayerTripwireSpeedThreshold(player) > (9 * K_GetKartSpeed(player, false, false)/4)) ; // If you're being prorated, aka above 225%
 		fixed_t maxspeed = K_PlayerTripwireSpeedThreshold(player); // Centered at this speed.
 		fixed_t minspeed = max(2 * maxspeed / 4, 7 * K_GetKartSpeed(player, false, false) / 5); // Starts appearing at this speed.
+#endif
 		fixed_t alertspeed = 9 * maxspeed / 10; // When to flash?
 		fixed_t frontoffset = 5*target->scale; // How far in front?
 
@@ -8075,6 +8229,38 @@ static boolean P_MobjRegularThink(mobj_t *mobj)
 		fixed_t sin = FINESINE(facing >> ANGLETOFINESHIFT);
 		fixed_t cos = FINECOSINE(facing >> ANGLETOFINESHIFT);
 
+#ifdef RR_LOWEND_CODE
+		// MK7: invisible (percentvisible==0) and with no position-dependent sound
+		// -> do not move (P_MoveOrigin does CheckPosition). cvmem=1 marks the old position;
+		// when seen again P_SetOrigin is used (no interpolating from the old position).
+		if (RR_LOWEND) {
+		if (percentvisible == 0
+			&& (!not_respawning || (myspeed < minspeed && !player->tripwireLeniency)))
+		{
+			mobj->cvmem = 1;
+			rr3ds_mk7_tripSkip++;
+		}
+		else
+		{
+			const fixed_t rr3ds_nx = target->x - FixedMul(xofs, sin) + FixedMul(frontoffset, cos);
+			const fixed_t rr3ds_ny = target->y + FixedMul(xofs, cos) + FixedMul(frontoffset, sin);
+			const fixed_t rr3ds_nz = target->z + zofs + (target->height / 2);
+			if (mobj->cvmem)
+			{
+				mobj->cvmem = 0;
+				P_SetOrigin(mobj, rr3ds_nx, rr3ds_ny, rr3ds_nz);
+			}
+			else
+				P_MoveOrigin(mobj, rr3ds_nx, rr3ds_ny, rr3ds_nz);
+			if (P_MobjWasRemoved(mobj))
+				return false;
+			mobj->angle = facing + ANGLE_90 + (mobj->extravalue1 ? ANGLE_45 : -1*ANGLE_45);
+			P_InstaScale(mobj, FixedMul(target->scale, easedscale));
+			K_MatchGenericExtraFlagsNoInterp(mobj, target);
+		}
+		} else
+#endif
+		{
 		P_MoveOrigin(mobj,
 			target->x - FixedMul(xofs, sin) + FixedMul(frontoffset, cos),
 			target->y + FixedMul(xofs, cos) + FixedMul(frontoffset, sin),
@@ -8082,6 +8268,7 @@ static boolean P_MobjRegularThink(mobj_t *mobj)
 		mobj->angle = facing + ANGLE_90 + (mobj->extravalue1 ? ANGLE_45 : -1*ANGLE_45);
 		P_InstaScale(mobj, FixedMul(target->scale, easedscale));
 		K_MatchGenericExtraFlagsNoInterp(mobj, target);
+		}
 
 		UINT8 maxtranslevel = NUMTRANSMAPS;
 		UINT8 trans = FixedInt(FixedMul(percentvisible, FRACUNIT*(maxtranslevel+1)));
@@ -10818,10 +11005,205 @@ static boolean P_FuseThink(mobj_t *mobj)
 //
 // P_MobjThinker
 //
+#ifdef RR_LOWEND_CODE
+// RR3DS: true if any player (mo) is within radius+radius+margin in X or Y.
+static boolean RR3DS_PlayerNear(mobj_t *mobj)
+{
+	INT32 i;
+	fixed_t margin = FixedMul(512*FRACUNIT, mapobjectscale);
+	for (i = 0; i < MAXPLAYERS; i++)
+	{
+		mobj_t *pmo;
+		fixed_t d;
+		if (!playeringame[i])
+			continue;
+		pmo = players[i].mo;
+		if (pmo == NULL || P_MobjWasRemoved(pmo))
+			continue;
+		d = mobj->radius + pmo->radius + margin;
+		if (abs(pmo->x - mobj->x) < d && abs(pmo->y - mobj->y) < d)
+			return true;
+	}
+	return false;
+}
+
+// true if ALL players are farther than `dist` units in X or Y.
+// player positions cached per tic (before, 16 slots were walked per ring).
+static boolean RR3DS_RingFarDist(mobj_t *mobj, fixed_t dist)
+{
+	static tic_t cachetic = (tic_t)-1;
+	static INT32 cachen = 0;
+	static fixed_t cx[MAXPLAYERS], cy[MAXPLAYERS];
+	INT32 i;
+	const fixed_t d = FixedMul(dist, mapobjectscale);
+	if (cachetic != gametic)
+	{
+		cachetic = gametic;
+		cachen = 0;
+		for (i = 0; i < MAXPLAYERS; i++)
+		{
+			mobj_t *pmo;
+			if (!playeringame[i])
+				continue;
+			pmo = players[i].mo;
+			if (pmo == NULL || P_MobjWasRemoved(pmo))
+				continue;
+			cx[cachen] = pmo->x;
+			cy[cachen] = pmo->y;
+			cachen++;
+		}
+	}
+	for (i = 0; i < cachen; i++)
+	{
+		if (abs(cx[i] - mobj->x) < d && abs(cy[i] - mobj->y) < d)
+			return false;
+	}
+	return true;
+}
+
+// true if ALL cameras (on-screen players) are farther than `dist` in X or Y.
+static boolean RR3DS_FarFromViews(mobj_t *mobj, fixed_t dist)
+{
+	static tic_t cachetic = (tic_t)-1;
+	static INT32 cachen = 0;
+	static fixed_t cx[MAXSPLITSCREENPLAYERS], cy[MAXSPLITSCREENPLAYERS];
+	INT32 i;
+	const fixed_t d = FixedMul(dist, mapobjectscale);
+	if (cachetic != gametic)
+	{
+		cachetic = gametic;
+		cachen = 0;
+		for (i = 0; i <= r_splitscreen && i < MAXSPLITSCREENPLAYERS; i++)
+		{
+			const INT32 pn = displayplayers[i];
+			mobj_t *pmo;
+			if (pn < 0 || pn >= MAXPLAYERS || !playeringame[pn])
+				continue;
+			pmo = players[pn].mo;
+			if (pmo == NULL || P_MobjWasRemoved(pmo))
+				continue;
+			cx[cachen] = pmo->x;
+			cy[cachen] = pmo->y;
+			cachen++;
+		}
+	}
+	if (cachen == 0)
+		return false;
+	for (i = 0; i < cachen; i++)
+	{
+		if (abs(cx[i] - mobj->x) < d && abs(cy[i] - mobj->y) < d)
+			return false;
+	}
+	return true;
+}
+
+// objects attached to a kart (auras, amp rings, block, indicators). With 8 racers
+// were ~16 ms per tic and always think, even when hidden.
+static boolean RR3DS_IsKartAttach(mobjtype_t t)
+{
+	return (t == MT_AMPRING || t == MT_AMPBODY || t == MT_AMPAURA || t == MT_BLOCKRING
+		|| t == MT_BLOCKBODY || t == MT_CHARGEAURA || t == MT_TRICKINDICATOR
+		|| t == MT_WAVEDASH || t == MT_SMOOTHLANDING);
+}
+
+static boolean RR3DS_OwnerIsQuietBot(mobj_t *mobj)
+{
+	mobj_t *o = mobj->target ? mobj->target : mobj->owner;
+	return (o != NULL && !P_MobjWasRemoved(o) && o->player != NULL && o->player->bot
+		&& !P_IsDisplayPlayer(o->player));
+}
+
+static boolean RR3DS_RingFar(mobj_t *mobj)
+{
+	return RR3DS_RingFarDist(mobj, 3000*FRACUNIT);
+}
+
+// MK7: if it is 1, the ring fast path keeps calling the actions of
+// sector (P_CheckMobjTouchingSectorActions). 0 = skipped.
+#ifndef MK7_RING_SECTORACT
+#define MK7_RING_SECTORACT 0
+#endif
+
+// MK7: idle ring (MT_RING) that in the original code would only do
+// P_CycleMobjState + A_AttractChase "idling". The attraction is started by the
+// player (K_LookForRings sets tracer), not by the ring.
+static boolean RR3DS_RingIdle(mobj_t *mobj)
+{
+	return (mobj->type == MT_RING
+		&& udmf
+		&& mobj->player == NULL
+		&& !(mobj->flags & (MF_SCENERY|MF_PUSHABLE|MF_BOSS|MF_ENEMY))
+		&& !(mobj->info->flags & MF_PUSHABLE)
+		&& mobj->health > 0
+		&& mobj->scale == mobj->destscale
+		&& !(mobj->eflags & MFE_TRACERANGLE)
+		&& mobj->momx == 0 && mobj->momy == 0 && mobj->momz == 0
+		&& mobj->fuse == 0);
+}
+
+// MK7: idle floating object far from players: P_ZMovement would do nothing and
+// P_CheckPosition could only affect players (types with their own logic
+// like "tm.thing" in PIT_CheckThing are excluded).
+static boolean RR3DS_FloaterIdle(mobj_t *mobj)
+{
+	if (!(mobj->flags & MF_NOGRAVITY) || mobj->player != NULL)
+		return false;
+	if (mobj->momx || mobj->momy || mobj->momz)
+		return false;
+	if (mobj->flags & (MF_MISSILE|MF_PUSHABLE|MF_ENEMY|MF_BOSS|MF_SHOOTABLE|MF_PAIN|MF_FLOAT))
+		return false;
+	if ((mobj->flags2 & MF2_SKULLFLY) || (mobj->eflags & MFE_APPLYPMOMZ))
+		return false;
+	if (mobj->standingslope != NULL || mobj->terrain != NULL)
+		return false;
+	// strictly between floor and ceiling: no "touch floor/ceiling" branch
+	if (mobj->z <= mobj->floorz || mobj->z + mobj->height >= mobj->ceilingz)
+		return false;
+	// FOFs/polyobjects can change floorz inside ZMovement
+	if (mobj->subsector == NULL || mobj->subsector->sector->ffloors || mobj->subsector->polyList)
+		return false;
+	switch (mobj->type)
+	{
+		// own logic in P_ZMovement / P_SceneryZMovement
+		case MT_SPINFIRE: case MT_FALLINGROCK: case MT_BIGTUMBLEWEED:
+		case MT_LITTLETUMBLEWEED: case MT_EMERALD: case MT_TOXOMISTER_POLE:
+		case MT_RING: case MT_BLUESPHERE: case MT_FLINGRING:
+		case MT_FLAMEJET: case MT_VERTICALFLAMEJET: case MT_SPIKE: case MT_WALLSPIKE:
+		case MT_BALLHOG: case MT_BALLHOG_RETICULE_TEST: case MT_MONITOR:
+		case MT_BOOMEXPLODE: case MT_BOOMPARTICLE: case MT_SMALLBUBBLE:
+		case MT_MEDIUMBUBBLE: case MT_SEED: case MT_MONITOR_SHARD:
+		case MT_EMROCKS_PARTICLE: case MT_EMFAUCET_DRIP: case MT_EMFAUCET_PARTICLE:
+		case MT_BATTLEUFO_BEAM:
+		// types with their own branches like g_tm.thing in PIT_CheckThing
+		case MT_BALLHOGBOOM: case MT_BANANA: case MT_BANANA_SHIELD:
+		case MT_BATTLECAPSULE: case MT_BLENDEYE_EYE: case MT_BLENDEYE_MAIN:
+		case MT_BLENDEYE_PUYO: case MT_BUBBLESHIELD: case MT_DROPTARGET:
+		case MT_DROPTARGET_SHIELD: case MT_EGGMANITEM: case MT_EGGMANITEM_SHIELD:
+		case MT_GACHABOM: case MT_GARDENTOP: case MT_INSTAWHIP: case MT_JAWZ:
+		case MT_JAWZ_SHIELD: case MT_KART_LEFTOVER: case MT_LANDMINE:
+		case MT_ORBINAUT: case MT_ORBINAUT_SHIELD: case MT_PATROLIVOBALL:
+		case MT_RANDOMITEM: case MT_SHRINK_GUN: case MT_SHRINK_PARTICLE:
+		case MT_SINK: case MT_SNEAKERPANEL: case MT_SPB: case MT_SSMINE:
+		case MT_SSMINE_SHIELD: case MT_STEAM:
+		// already has its own shortcut
+		case MT_LOOPENDPOINT:
+			return false;
+		default:
+			break;
+	}
+	if (P_CanDeleteKartItem(mobj->type) || K_IsMissileOrKartItem(mobj))
+		return false;
+	return !RR3DS_PlayerNear(mobj);
+}
+#endif
+
 void P_MobjThinker(mobj_t *mobj)
 {
 	I_Assert(mobj != NULL);
 	I_Assert(!P_MobjWasRemoved(mobj));
+#ifdef RR_LOWEND_CODE
+	RR3DS_RingWake(mobj); // safety check of a sleeping ring (it goes back to sleep if it is still idle)
+#endif
 	// Remove dead target/tracer.
 	if (mobj->target && P_MobjWasRemoved(mobj->target))
 		P_SetTarget(&mobj->target, NULL);
@@ -10900,8 +11282,221 @@ void P_MobjThinker(mobj_t *mobj)
 	mobj->eflags &= ~(MFE_PUSHED|MFE_SPRUNG|MFE_JUSTBOUNCEDWALL|MFE_DAMAGEHITLAG|MFE_SLOPELAUNCHED);
 
 	// sal: what the hell? is there any reason this isn't done, like, literally ANYWHERE else?
+#ifdef RR_LOWEND_CODE
+	// almost always NULL already; avoids 2 calls per mobj per tic (~1060/tic)
+	if (g_tm.floorthing) P_SetTarget(&g_tm.floorthing, NULL);
+	if (g_tm.hitthing) P_SetTarget(&g_tm.hitthing, NULL);
+#else
 	P_SetTarget(&g_tm.floorthing, NULL);
 	P_SetTarget(&g_tm.hitthing, NULL);
+#endif
+
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND) { // PC only with low-end mode
+	// attachments of HIDDEN bot karts think 1 of every 4 tics; visible ones, always.
+	if (RR3DS_IsKartAttach(mobj->type) && (mobj->renderflags & RF_DONTDRAW)
+		&& ((leveltime + ((UINT32)(uintptr_t)mobj >> 4)) & 3) && RR3DS_OwnerIsQuietBot(mobj))
+		return;
+	// fixed objects (springs, boxes, capsule boxes, tripwire) far from the camera: 1 of every 4 tics.
+	// They only animate; contact with karts is detected by the kart, not the object.
+	if ((mobj->type == MT_YELLOWSPRING || mobj->type == MT_GREYSPRING || mobj->type == MT_GREYDIAG
+		|| mobj->type == MT_DASHRING || mobj->type == MT_RANDOMITEM || mobj->type == MT_ITEMCAPSULE_PART
+		|| mobj->type == MT_TRIPWIREAPPROACH)
+		&& !mobj->momx && !mobj->momy && !mobj->momz
+		&& ((leveltime + ((UINT32)(uintptr_t)mobj >> 4)) & 3) && RR3DS_FarFromViews(mobj, 3000*FRACUNIT))
+		return;
+	// finish-line sparks far from all cameras: removed (they recreate themselves when approached).
+	if (mobj->type == MT_SIGNSPARKLE && RR3DS_FarFromViews(mobj, 2500*FRACUNIT))
+	{
+		P_RemoveMobj(mobj);
+		return;
+	}
+	// DISTANCE-BASED SLEEP (idea from OoT: the volume counts ALL players, bots included,
+	// not just the camera). Only effects and thrown rings; sectors/elevators/FOFs are not mobjs, untouched.
+	// (1) Thrown ring with no magnet and farther than 2500 from ALL karts: 3 of 4 tics it does not think (the fuse continues
+	// going down so it dies in time). When a kart approaches it thinks normally again.
+	// (2) Smoke/dust/sparks from karts farther than 3000 from all cameras: deleted (nobody sees them).
+	if (rr3ds_farSleepOn)
+	{
+		// On PC the turn does NOT come from the pointer: online each machine has different pointers
+		// and the ring would end up elsewhere (desync). There: everyone on the same tics.
+		if (mobj->type == MT_FLINGRING && mobj->tracer == NULL
+#ifdef __3DS__
+			&& ((leveltime + ((UINT32)(uintptr_t)mobj >> 4)) & 3)
+#else
+			&& (leveltime & 3)
+#endif
+			&& RR3DS_RingFarDist(mobj, 2500*FRACUNIT))
+		{
+			if (mobj->fuse > 1) { mobj->fuse--; rr3ds_farSlept++; return; }
+			if (mobj->fuse == 0) { rr3ds_farSlept++; return; }
+		}
+		switch (mobj->type)
+		{
+			case MT_BOOSTSMOKE: case MT_BOOSTFLAME: case MT_SPINDASHDUST: case MT_RINGSPARKS:
+			case MT_DRIFTDUST: case MT_BRAKEDUST: case MT_TIREGREASE: case MT_JANKSPARK:
+				if (RR3DS_FarFromViews(mobj, 3000*FRACUNIT))
+				{
+					rr3ds_farSlept++;
+					P_RemoveMobj(mobj);
+					return;
+				}
+				break;
+			default:
+				break;
+		}
+	}
+	// MK7: idle ring -> only what the original would really do:
+	// P_RingThinker (=P_CycleMobjState with mom/fuse at 0) + A_AttractChase.
+	// Skipped: sector actions (see MK7_RING_SECTORACT), Lua hook and dispatch.
+	if (RR3DS_RingIdle(mobj))
+	{
+		rr3ds_mk7_ringFast++;
+		// sleep (see RR3DS_RingWake). Only with the global S_RING animation and
+		// with nothing pending; otherwise the path below is followed.
+		if (rr3ds_ringSleepOn && mobj->state == &states[S_RING] && mobj->tracer == NULL
+			&& mobj->extravalue1 == 0 && mobj->cusval == 0 && mobj->threshold <= 0
+			&& mobj->hitlag == 0 && !(mobj->flags2 & MF2_NIGHTSPULL)
+			&& (mobj->frame & FF_ANIMATE))
+		{
+			mobj->renderflags &= ~RF_DONTDRAW;
+			mobj->thinker.rr3ds_sleep = 1;
+			RR3DS_RingSyncFrame(mobj);
+			return;
+		}
+		// ring far from all players: animate only 1 of every 4 tics
+		// (barely visible; does not affect gameplay). Nearby ones stay normal.
+		// radius lowered 3000 -> 2000.
+		// far from the CAMERAS (before: from all players; with 8 racers spread out almost none counted)
+		if ((leveltime & 3) && RR3DS_FarFromViews(mobj, 2000*FRACUNIT))
+			return;
+#if MK7_RING_SECTORACT
+		P_CheckMobjTouchingSectorActions(mobj, true, true);
+		if (P_MobjWasRemoved(mobj))
+			return;
+#endif
+		P_CycleMobjState(mobj);
+		if (P_MobjWasRemoved(mobj))
+			return;
+		// MK7: A_AttractChase with extravalue1==0, tracer NULL, cusval 0, threshold<=0
+		// and fuse 0 only removes RF_DONTDRAW. Otherwise the original is called.
+		if (!(mobj->flags2 & MF2_NIGHTSPULL) && mobj->health > 0
+			&& mobj->extravalue1 == 0 && mobj->tracer == NULL
+			&& mobj->cusval == 0 && mobj->threshold <= 0 && mobj->fuse == 0)
+			mobj->renderflags &= ~RF_DONTDRAW;
+		else
+			A_AttractChase(mobj);
+		return;
+	}
+
+	// idle blue sphere (prison/battle: ~200 per map, 19 ms per tic with the thinker
+	// full). Without gravity or movement it only changes state (bounce animation).
+	if (mobj->type == MT_BLUESPHERE
+		&& mobj->player == NULL && mobj->tracer == NULL && mobj->health > 0
+		&& !(mobj->flags & (MF_PUSHABLE|MF_BOSS|MF_ENEMY))
+		&& mobj->scale == mobj->destscale
+		&& mobj->momx == 0 && mobj->momy == 0 && mobj->momz == 0
+		&& mobj->fuse == 0 && mobj->hitlag == 0)
+	{
+		P_CycleMobjState(mobj);
+		return;
+	}
+
+	// fog (MT_EERIEFOG, ~1050 on UmbrellaRushwinds): idle, NOCLIP, nobody touches it,
+	// but each one requested P_CheckPosition per tic (1051 per tic). It only changes state (animation).
+	// If something pushes it (wind), it moves with no check (P_MoveOrigin -> RR3DS_CheapMove, p_map.c).
+	if (mobj->type == MT_EERIEFOG)
+	{
+		if (mobj->player == NULL
+			&& mobj->scale == mobj->destscale && mobj->fuse == 0
+			&& !(mobj->flags & (MF_SOLID|MF_SPECIAL|MF_SHOOTABLE|MF_MISSILE|MF_PUSHABLE|MF_PAIN)))
+		{
+			if (mobj->momx || mobj->momy || mobj->momz)
+				P_MoveOrigin(mobj, mobj->x + mobj->momx, mobj->y + mobj->momy, mobj->z + mobj->momz);
+			P_CycleMobjState(mobj);
+			return;
+		}
+		else
+		{
+			static int warnings = 0;
+			if (warnings < 3)
+			{
+				warnings++;
+				RR_DIAGPRINT("[FOG] no shortcut: flags=%08x mom=%d,%d,%d fuse=%d scale=%d dest=%d\n",
+					(unsigned)mobj->flags, (int)(mobj->momx>>16), (int)(mobj->momy>>16), (int)(mobj->momz>>16),
+					(int)mobj->fuse, (int)mobj->scale, (int)mobj->destscale);
+			}
+		}
+	}
+
+	// map-specific decoration (FREESLOT types from the SOCs: flowers, bushes, trees;
+	// UmbrellaRushwinds has ~800 and each one spent ~94 us per tic while idle = ~65 ms).
+	// They have no logic of their own in the engine: idle and resting on the ground (or without gravity) they only animate.
+	if (mobj->type >= MT_FIRSTFREESLOT
+		&& (mobj->flags & MF_SCENERY)
+		&& !(mobj->flags & (MF_SPECIAL|MF_SHOOTABLE|MF_MISSILE|MF_PUSHABLE|MF_ENEMY|MF_BOSS|MF_PAIN))
+		&& mobj->player == NULL && mobj->tracer == NULL && mobj->target == NULL
+		&& mobj->health > 0 && mobj->fuse == 0
+		&& mobj->scale == mobj->destscale
+		&& mobj->momx == 0 && mobj->momy == 0 && mobj->momz == 0
+		&& !(mobj->eflags & MFE_APPLYPMOMZ)
+		&& ((mobj->flags & MF_NOGRAVITY)
+			|| ((mobj->eflags & MFE_VERTICALFLIP) ? (mobj->z + mobj->height == mobj->ceilingz) : (mobj->z == mobj->floorz))))
+	{
+		if (mobj->tics != -1)
+			P_CycleMobjState(mobj);
+		return;
+	}
+
+	// Metropolis, 108 idle diagonal springs (MT_GREYDIAG) = 39 ms of tic (~365 us each).
+	// Idle spring (fixed state, no momentum, no gravity): thinks 1 of every 8 tics. When stepped on
+	// moves to a state with a duration (tics != -1) and thinks every tic again.
+	if ((leveltime & 7)
+		&& (mobj->flags & MF_SPRING) && (mobj->flags & MF_NOGRAVITY)
+		&& mobj->tics == -1 && mobj->fuse == 0 && mobj->hitlag == 0
+		&& mobj->player == NULL && mobj->tracer == NULL
+		&& mobj->momx == 0 && mobj->momy == 0 && mobj->momz == 0
+		&& mobj->scale == mobj->destscale)
+		return;
+
+	// Opulence, idle coins (dn 3777, Lua every tic) and gems (dn 3830) on the ground:
+	// ~100-130 us each x ~400 = 46 ms of tic. While idle they only think 1 of every 8 tics; when touched
+	// (TouchSpecial gives them momentum) they think every tic again.
+	if ((leveltime & 7)
+		&& mobj->type >= MT_FIRSTFREESLOT
+		&& (mobjinfo[mobj->type].doomednum == 3777 || mobjinfo[mobj->type].doomednum == 3830)
+		&& mobj->tics == -1 && mobj->fuse == 0 && mobj->hitlag == 0
+		&& mobj->player == NULL && mobj->tracer == NULL
+		&& mobj->momx == 0 && mobj->momy == 0 && mobj->momz == 0
+		&& mobj->scale == mobj->destscale
+		&& ((mobj->eflags & MFE_VERTICALFLIP) ? (mobj->z + mobj->height == mobj->ceilingz) : (mobj->z == mobj->floorz)))
+		return;
+
+	// Route1980, ECZ trees (dn 2040/2041, MF_SOLID, fixed state): 140 objects = 6.9 ms of tic and
+	// ~144 collision checks per tic. Idle on the ground they think 1 of every 8 tics.
+	if ((leveltime & 7)
+		&& mobj->type >= MT_FIRSTFREESLOT
+		&& (mobjinfo[mobj->type].doomednum == 2040 || mobjinfo[mobj->type].doomednum == 2041)
+		&& mobj->tics == -1 && mobj->fuse == 0 && mobj->hitlag == 0
+		&& mobj->player == NULL && mobj->tracer == NULL
+		&& mobj->momx == 0 && mobj->momy == 0 && mobj->momz == 0
+		&& mobj->scale == mobj->destscale
+		&& ((mobj->eflags & MFE_VERTICALFLIP) ? (mobj->z + mobj->height == mobj->ceilingz) : (mobj->z == mobj->floorz)))
+		return;
+
+	// idle decor (scenery, fixed state tics=-1, no movement) far from
+	// all players: think only 1 of every 4 tics (cacti, pumpkins...).
+	if ((leveltime & 3)
+		&& (mobj->flags & MF_SCENERY)
+		&& mobj->tics == -1
+		&& mobj->player == NULL && mobj->tracer == NULL
+		&& mobj->fuse == 0 && mobj->hitlag == 0
+		&& mobj->momx == 0 && mobj->momy == 0 && mobj->momz == 0
+		&& mobj->scale == mobj->destscale
+		&& RR3DS_FarFromViews(mobj, 2500*FRACUNIT)) // far from the CAMERA (before: from all karts)
+		return;
+	} // RR_LOWEND
+#endif
 
 	if (udmf)
 	{
@@ -10977,6 +11572,12 @@ void P_MobjThinker(mobj_t *mobj)
 			mobj->renderflags |= RF_DONTDRAW;
 	}
 
+#ifdef RR_LOWEND_CODE
+	// small bubbles (Dragonspire, ~340 alive = 12 ms of tic): think 1 of 2 tics (they rise at half
+	// speed, half the cost).
+	if (RR_LOWEND && mobj->type == MT_SMALLBUBBLE && ((leveltime + (UINT32)(size_t)mobj/16) & 1))
+		return;
+#endif
 	// Special thinker for scenery objects
 	if (mobj->flags & MF_SCENERY)
 	{
@@ -10984,10 +11585,34 @@ void P_MobjThinker(mobj_t *mobj)
 		return;
 	}
 
+#ifdef RR_LOWEND_CODE
+	// QuartzQuadrant, spark generator of the saws (doomednum 697, Lua MobjThinker
+	// every 4 tics: spark + 2 smokes + 2 particles). Decoration only: on 3DS we call it 1 of every 8
+	// tics (half the particles: ~12 ms less per tic).
+	if (RR_LOWEND && mobj->type >= MT_FIRSTFREESLOT && mobjinfo[mobj->type].doomednum == 697
+		&& (leveltime & 7))
+		return;
+	// rock generator on the conveyors (doomednum 698, decorative): half the rocks.
+	if (RR_LOWEND && mobj->type >= MT_FIRSTFREESLOT && mobjinfo[mobj->type].doomednum == 698
+		&& (leveltime % 34))
+		return;
+	// Darkvile/VantablackViolet, flame generator (doomednum 2479, 46 objects, Lua on EVERY
+	// tic, ~900 us each): on 3DS 1 of every 4 tics (a quarter of the flames).
+	if (RR_LOWEND && mobj->type >= MT_FIRSTFREESLOT && mobjinfo[mobj->type].doomednum == 2479
+		&& (leveltime & 3))
+		return;
+#endif
+	// Hot Shelter/Route1980, small spikes (dn 2464): their Lua only changes flags depending on the state
+	// (~280 us each x 44 = 12.5 ms). Called 1 of every 4 tics (flags lag by <=3 tics).
+	boolean rr3ds_skipLua = false;
+#ifdef RR_LOWEND_CODE
+	rr3ds_skipLua = (RR_LOWEND && (leveltime & 3) && mobj->type >= MT_FIRSTFREESLOT
+		&& mobjinfo[mobj->type].doomednum == 2464 && !mobj->player);
+#endif
 	// Check for a Lua thinker first
 	if (!mobj->player)
 	{
-		if (LUA_HookMobj(mobj, MOBJ_HOOK(MobjThinker)) || P_MobjWasRemoved(mobj))
+		if (!rr3ds_skipLua && (LUA_HookMobj(mobj, MOBJ_HOOK(MobjThinker)) || P_MobjWasRemoved(mobj)))
 			return;
 	}
 	else if (!mobj->player->spectator)
@@ -11090,11 +11715,30 @@ void P_MobjThinker(mobj_t *mobj)
 		|| (!(mobj->eflags & MFE_VERTICALFLIP) && mobj->z != mobj->floorz)
 		|| P_IsObjectInGoop(mobj))
 	{
+#ifdef RR_LOWEND_CODE
+		// MK7: idle floater with no players nearby -> skip ZMovement+CheckPosition.
+		if (RR_LOWEND && RR3DS_FloaterIdle(mobj))
+			rr3ds_mk7_floatSkip++;
+		else
+		{
+#endif
 		if (!P_ZMovement(mobj))
 			return; // mobj was removed
+#ifdef RR_LOWEND_CODE
+		// RR3DS: MT_LOOPENDPOINT (radius MAXRADIUS) floats and used to do a CheckPosition
+		// huge every tic. It can only touch players: if none is nearby, the
+		// result would be identical -> it is skipped (replays intact).
+		// MT_FLINGRING does P_TryMove(x,y) (sliding) right afterwards, which already
+		// includes this CheckPosition (and picks up objects just the same): do not repeat it.
+		if (!RR_LOWEND || ((mobj->type != MT_LOOPENDPOINT || RR3DS_PlayerNear(mobj))
+			&& !(mobj->type == MT_FLINGRING && rr3ds_flingNoCol)))
+#endif
 		P_CheckPosition(mobj, mobj->x, mobj->y, NULL); // Need this to pick up objects!
 		if (P_MobjWasRemoved(mobj))
 			return;
+#ifdef RR_LOWEND_CODE
+		}
+#endif
 	}
 	else
 	{
@@ -11250,6 +11894,27 @@ void P_SceneryThinker(mobj_t *mobj)
 		|| (!(mobj->eflags & MFE_VERTICALFLIP) && mobj->z != mobj->floorz)
 		|| P_IsObjectInGoop(mobj))
 	{
+#ifdef RR_LOWEND_CODE
+		// MK7: idle floating decoration with no players nearby -> skip ZMovement+CheckPosition.
+		// the same for ANY effect that passes through everything (smoke, dust, sparks, trails).
+		if (RR_LOWEND && !(mobj->eflags & MFE_APPLYPMOMZ)
+			&& ((mobj->type == MT_BATTLECAPSULE_PIECE && (mobj->flags & MF_NOCLIPHEIGHT))
+				|| ((mobj->flags & (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOCLIPHEIGHT|MF_NOGRAVITY)) == (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOCLIPHEIGHT|MF_NOGRAVITY)
+					&& mobj->player == NULL
+					&& mobj->type != MT_BOOMEXPLODE && mobj->type != MT_BOOMPARTICLE
+					&& mobj->type != MT_SMALLBUBBLE && mobj->type != MT_MEDIUMBUBBLE)
+				|| (mobj->type == MT_SMOKE && (mobj->flags & (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOGRAVITY)) == (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOGRAVITY)))) // smoke
+		{
+			// capsule follower piece (NOCLIP, no gravity, ~98 per map): ZMovement
+			// only does z += momz; P_CheckPosition (floor/ceiling) is no use for a NOCLIP.
+			mobj->z += mobj->momz;
+		}
+		else
+		if (RR_LOWEND && RR3DS_FloaterIdle(mobj))
+			rr3ds_mk7_scenSkip++;
+		else
+		{
+#endif
 		if (!P_SceneryZMovement(mobj))
 			return; // mobj was removed
 		P_CheckPosition(mobj, mobj->x, mobj->y, NULL); // Need this to pick up objects!
@@ -11259,6 +11924,9 @@ void P_SceneryThinker(mobj_t *mobj)
 		mobj->ceilingz = g_tm.ceilingz;
 		mobj->floorrover = g_tm.floorrover;
 		mobj->ceilingrover = g_tm.ceilingrover;
+#ifdef RR_LOWEND_CODE
+		}
+#endif
 	}
 	else
 	{
@@ -12102,6 +12770,9 @@ void P_RemoveMobj(mobj_t *mobj)
 	if (P_MobjWasRemoved(mobj))
 		return; // something already removing this mobj.
 
+#ifdef RR_LOWEND_CODE
+	mobj->thinker.rr3ds_sleep = 0;
+#endif
 	mobj->thinker.function.acp1 = (actionf_p1)P_RemoveThinkerDelayed; // shh. no recursing.
 	LUA_HookMobj(mobj, MOBJ_HOOK(MobjRemoved));
 	mobj->thinker.function.acp1 = (actionf_p1)P_MobjThinker; // needed for P_UnsetThingPosition, etc. to work.
@@ -12385,9 +13056,39 @@ void P_RemoveSavegameMobj(mobj_t *mobj)
 	P_UnlinkThinker((thinker_t*)mobj);
 }
 
-static void P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
+#ifdef RR_LOWEND_CODE
+// RAIN THAT FOLLOWS THE CAMERA (low-end / 3DS).
+// The original creates particles over the WHOLE map on load: on LaunchBase / BlueMountain2 they are
+// ~100k (28 MB of PU_LEVEL) and the 3DS runs out of memory; also every moving sector
+// recomputes the floor of ALL of its particles (P_RecalcPrecipInSector) every tic.
+// Only the ones near a camera live here: every tic those farther than
+// 1.5 x drawdist_precip are deleted and new ones are created (up to precip_follow attempts) in cells of the
+// blockmap at random within drawdist, without exceeding precip_density per cell or
+// precip_max in total. Drawing does not change (it uses precipblocklinks within drawdist_precip).
+// Own RNG: it does not touch the game's (replays stay identical).
+static UINT32 rr_precip_rng = 0x9E3779B9u;
+static int rr_precip_max = 512, rr_precip_follow = 24, rr_precip_density = 2, rr_precip_read = 0;
+static UINT32 Precip_Rand(void)
+{
+	UINT32 x = rr_precip_rng;
+	x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+	rr_precip_rng = x ? x : 0x9E3779B9u;
+	return rr_precip_rng;
+}
+static INT32 Precip_RandKey(INT32 n) { return RR_LOWEND ? (INT32)(Precip_Rand() % (UINT32)n) : M_RandomKey(n); }
+static UINT8 Precip_RandByte(void) { return RR_LOWEND ? (UINT8)Precip_Rand() : M_RandomByte(); }
+static INT32 Precip_RandRange(INT32 a, INT32 b) { return RR_LOWEND ? a + (INT32)(Precip_Rand() % (UINT32)(b - a + 1)) : M_RandomRange(a, b); }
+#else
+#define Precip_RandKey M_RandomKey
+#define Precip_RandByte M_RandomByte
+#define Precip_RandRange M_RandomRange
+#endif
+
+// Returns how many particles it created.
+static INT32 P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
 {
 	INT32 j, k;
+	INT32 created = 0;
 
 	const mobjtype_t type = precipprops[curWeather].type;
 	const UINT8 randomstates = (UINT8)mobjinfo[type].damage;
@@ -12405,8 +13106,8 @@ static void P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
 	// more area so spawn more precipitation in that area.
 	for (i = 0; i < FRACUNIT; i += mapobjectscale)
 	{
-		x = basex + ((M_RandomKey(MAPBLOCKUNITS << 3) << FRACBITS) >> 3);
-		y = basey + ((M_RandomKey(MAPBLOCKUNITS << 3) << FRACBITS) >> 3);
+		x = basex + ((Precip_RandKey(MAPBLOCKUNITS << 3) << FRACBITS) >> 3);
+		y = basey + ((Precip_RandKey(MAPBLOCKUNITS << 3) << FRACBITS) >> 3);
 
 		precipsector = R_PointInSubsectorOrNull(x, y);
 
@@ -12471,10 +13172,11 @@ static void P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
 			INT32 ceilingz;
 
 			rainmo = P_SpawnPrecipMobj(x, y, z, type);
+			created++;
 
 			if (randomstates > 0)
 			{
-				UINT8 mrand = M_RandomByte();
+				UINT8 mrand = Precip_RandByte();
 				UINT8 threshold = UINT8_MAX / (randomstates + 1);
 				statenum_t st = mobjinfo[type].spawnstate;
 
@@ -12494,7 +13196,7 @@ static void P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
 			if (floorz < ceilingz)
 			{
 				// Randomly assign a height, now that floorz is set.
-				rainmo->z = M_RandomRange(floorz, ceilingz) << FRACBITS;
+				rainmo->z = Precip_RandRange(floorz, ceilingz) << FRACBITS;
 			}
 			else
 			{
@@ -12503,7 +13205,125 @@ static void P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
 			}
 		}
 	}
+
+	return created;
 }
+
+#ifdef RR_LOWEND_CODE
+// position of view i (the camera if chasing; otherwise the viewed player's kart).
+static boolean Precip_ViewPos(INT32 i, fixed_t *x, fixed_t *y)
+{
+	const INT32 p = displayplayers[i];
+
+	if (camera[i].chase && camera[i].subsector)
+	{
+		*x = camera[i].x;
+		*y = camera[i].y;
+		return true;
+	}
+	if (p >= 0 && p < MAXPLAYERS && playeringame[p] && players[p].mo && !P_MobjWasRemoved(players[p].mo))
+	{
+		*x = players[p].mo->x;
+		*y = players[p].mo->y;
+		return true;
+	}
+	return false;
+}
+
+static boolean Precip_NearAnyView(fixed_t x, fixed_t y, fixed_t dist)
+{
+	INT32 i;
+	for (i = 0; i <= r_splitscreen; i++)
+	{
+		fixed_t cx, cy;
+		if (!Precip_ViewPos(i, &cx, &cy))
+			continue;
+		if (abs(x - cx) <= dist && abs(y - cy) <= dist)
+			return true;
+	}
+	return false;
+}
+
+// How many particles are already in a blockmap cell (draw list).
+static INT32 Precip_InCell(INT32 bx, INT32 by)
+{
+	INT32 n = 0;
+	precipmobj_t *th;
+	for (th = precipblocklinks[(by * bmapwidth) + bx]; th; th = th->bnext)
+		n++;
+	return n;
+}
+
+// Called once per tic from P_Ticker (after moving the cameras). See the comment above.
+void RR3DS_PrecipFollow(void)
+{
+	const mobjtype_t type = precipprops[curWeather].type;
+	const fixed_t drawdist = cv_drawdist_precip.value * mapobjectscale;
+	thinker_t *think, *next;
+	INT32 alive = 0, i, attempts, perCell;
+	fixed_t far_;
+
+	if (!rr_precip_read)
+	{
+		rr_precip_read = 1;
+		rr_precip_max = RRCfg_Int("precip_max", 512);
+		rr_precip_follow = RRCfg_Int("precip_follow", 24);
+		rr_precip_density = RRCfg_Int("precip_density", 2);
+	}
+
+	if (dedicated || !cv_drawdist_precip.value || type == MT_NULL || drawdist <= 0 || !precipblocklinks)
+		return;
+
+	far_ = drawdist + (drawdist >> 1);
+
+	// 1) delete the distant ones, count the remaining ones
+	for (think = thlist[THINK_PRECIP].next; think != &thlist[THINK_PRECIP]; think = next)
+	{
+		precipmobj_t *pm = (precipmobj_t *)think;
+		next = think->next;
+		if (think->function.acp1 != (actionf_p1)P_NullPrecipThinker)
+			continue;
+		if (!Precip_NearAnyView(pm->x, pm->y, far_))
+		{
+			P_FreePrecipMobj(pm);
+			continue;
+		}
+		alive++;
+	}
+
+	// 2) create near each view: random cells within drawdist.
+	// Original density per cell = (1/mapobjectscale) x (1 + height/2048); here a fixed cap.
+	perCell = rr_precip_density * max(1, FixedDiv(FRACUNIT, mapobjectscale) >> FRACBITS);
+	for (i = 0; i <= r_splitscreen && alive < rr_precip_max; i++)
+	{
+		fixed_t cx, cy;
+		INT32 xl, xh, yl, yh;
+
+		if (!Precip_ViewPos(i, &cx, &cy))
+			continue;
+
+		xl = (cx - drawdist - bmaporgx) >> MAPBLOCKSHIFT;
+		xh = (cx + drawdist - bmaporgx) >> MAPBLOCKSHIFT;
+		yl = (cy - drawdist - bmaporgy) >> MAPBLOCKSHIFT;
+		yh = (cy + drawdist - bmaporgy) >> MAPBLOCKSHIFT;
+		if (xl < 0) xl = 0;
+		if (yl < 0) yl = 0;
+		if (xh >= bmapwidth) xh = bmapwidth - 1;
+		if (yh >= bmapheight) yh = bmapheight - 1;
+		if (xl > xh || yl > yh)
+			continue;
+
+		for (attempts = 0; attempts < rr_precip_follow && alive < rr_precip_max; attempts++)
+		{
+			const INT32 bx = xl + Precip_RandKey(xh - xl + 1);
+			const INT32 by = yl + Precip_RandKey(yh - yl + 1);
+			if (Precip_InCell(bx, by) >= perCell)
+				continue;
+			alive += P_SpawnPrecipitationAt(bmaporgx + bx * MAPBLOCKSIZE, bmaporgy + by * MAPBLOCKSIZE);
+		}
+	}
+}
+#endif
 
 void P_SpawnPrecipitation(void)
 {
@@ -12515,6 +13335,11 @@ void P_SpawnPrecipitation(void)
 
 	if (dedicated || !cv_drawdist_precip.value || type == MT_NULL)
 		return;
+
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND)
+		return; // created by RR3DS_PrecipFollow every tic, only near the cameras
+#endif
 
 	// Use the blockmap to narrow down our placing patterns
 	for (i = 0; i < bmapwidth*bmapheight; ++i)
@@ -12871,6 +13696,11 @@ void P_SpawnPlayer(INT32 playernum)
 
 	for (UINT8 approaches = 0; approaches < 4; approaches++)
 	{
+#ifdef __3DS__
+		// 3DS: tripwire approach sprites only for human players (4 per kart, ~35 us each per tic)
+		if (p->bot)
+			break;
+#endif
 		mobj_t *approach = P_SpawnMobjFromMobj(p->mo, 0, 0, 0, MT_TRIPWIREAPPROACH);
 		P_SetTarget(&approach->target, p->mo);
 		approach->extravalue1 = (approaches == 0 || approaches == 2) ? 1 : 0;
@@ -14262,6 +15092,12 @@ static boolean P_SetupSpawnedMapThing(mapthing_t *mthing, mobj_t *mobj)
 		// Sryder 2018-12-7: Grabbed this from the old MT_BOSS3WAYPOINT section so they'll be in the waypointcap instead
 		P_SetTarget(&mobj->tracer, waypointcap);
 		P_SetTarget(&waypointcap, mobj);
+#ifdef RR_LOWEND_CODE
+		// MK7: the waypoint is just data (k_waypoint.cpp reads x/y/z and fields).
+		// Without gravity it never moves -> it needs no thinker.
+		if (RR_LOWEND && (mobj->flags & MF_NOGRAVITY))
+			mobj->flags |= MF_NOTHINK;
+#endif
 		break;
 	}
 	case MT_BOTHINT:

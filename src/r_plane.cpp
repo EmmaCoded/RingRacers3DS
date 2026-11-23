@@ -715,16 +715,24 @@ static void R_DrawSkyPlane(visplane_t *pl, void(*colfunc)(drawcolumndata_t*), bo
 	}
 	dc.lightmap = colormaps;
 	dc.texturemid = skytexturemid;
-	dc.texheight = textureheight[skytexture]
+#ifdef __3DS__
+	// Without a texture pk3 the sky name does not exist and skytexture ends up outside
+	// out of range: textureheight[]/texturetranslation[] read garbage and the sky
+	// was drawn with a random height (a different color stripe every time).
+	const INT32 sky3ds = (skytexture >= 0 && skytexture < numtextures) ? skytexture : 0;
+#else
+	const INT32 sky3ds = skytexture;
+#endif
+	dc.texheight = textureheight[sky3ds]
 		>>FRACBITS;
 	dc.sourcelength = dc.texheight;
 
 	x = pl->minx;
 
 	// Precache the texture so we don't corrupt the zoned heap off-main thread
-	if (!texturecache[texturetranslation[skytexture]])
+	if (!texturecache[texturetranslation[sky3ds]])
 	{
-		R_GenerateTexture(texturetranslation[skytexture]);
+		R_GenerateTexture(texturetranslation[sky3ds]);
 	}
 
 	while (x <= pl->maxx)
@@ -750,7 +758,7 @@ static void R_DrawSkyPlane(visplane_t *pl, void(*colfunc)(drawcolumndata_t*), bo
 				dc.iscale = FixedMul(skyscale[viewssnum], FINECOSINE(xtoviewangle[viewssnum][x + i]>>ANGLETOFINESHIFT));
 				dc.x = x + i;
 				dc.source =
-					R_GetColumn(texturetranslation[skytexture],
+					R_GetColumn(texturetranslation[sky3ds],
 						-angle); // get negative of angle for each column to display sky correct way round! --Monster Iestyn 27/01/18
 				dc.brightmap = NULL;
 

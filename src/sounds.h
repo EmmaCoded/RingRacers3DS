@@ -62,8 +62,16 @@ typedef enum
 } skinsound_t;
 
 // free sfx for S_AddSoundFx()
+#ifdef __3DS__
+#define NUMSFXFREESLOTS 256 // Reduced for 3DS (saves ~2 MB in S_sfx[])
+#else
 #define NUMSFXFREESLOTS 1600 // Matches SOC Editor.
+#endif
+#ifdef __3DS__
+#define NUMSKINSFXSLOTS (32*NUMSKINSOUNDS) // 3DS: 32 skins max (1120 slots, ~80 KB vs ~2.5 MB)
+#else
 #define NUMSKINSFXSLOTS (MAXSKINS*NUMSKINSOUNDS)
+#endif
 
 //
 // SoundFX struct.

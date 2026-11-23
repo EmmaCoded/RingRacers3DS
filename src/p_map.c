@@ -46,6 +46,7 @@
 #include "lua_hook.h"
 
 #include "m_perfstats.h" // ps_checkposition_calls
+#include "rr_config.h" // RR_LOWEND, cheap_move
 
 tm_t g_tm = {0};
 
@@ -103,8 +104,112 @@ camera_t *mapcampointer;
 //
 // P_TeleportMove
 //
+#ifdef __3DS__
+UINT32 rr3ds_cpCount[NUMMOBJTYPES];
+#endif
+#ifdef RR_LOWEND_CODE
+// decorations that follow a kart (charge aura, AMP, BLOCK...). Nobody collides with them.
+static boolean RR3DS_IsFollowVisual(const mobj_t *thing)
+{
+	switch (thing->type)
+	{
+		case MT_CHARGEAURA: case MT_AMPRING: case MT_AMPBODY: case MT_AMPAURA:
+		case MT_BLOCKRING: case MT_BLOCKBODY:
+		case MT_EXP: // experience orbs: they fly to the kart on their own, nobody touches them
+		case MT_EERIEFOG: // fog (UmbrellaRushwinds: ~1050 checks per tic)
+		case MT_SMOKE: // smoke (QuartzQuadrant: ~350 checks per tic), NOCLIP+NOBLOCKMAP
+			return true;
+		case MT_RING: case MT_FLINGRING:
+			// ring ALREADY collected (orbits the kart for 16 tics) or spent (bounces over the kart)
+			if (thing->extravalue1 != 0)
+				return true;
+			break;
+		default:
+			break;
+	}
+	// Any other visual-only object: out of the blockmap, no gravity and no collisions.
+	return ((thing->flags & (MF_NOBLOCKMAP|MF_NOGRAVITY|MF_NOCLIPHEIGHT)) == (MF_NOBLOCKMAP|MF_NOGRAVITY|MF_NOCLIPHEIGHT)
+		&& (thing->flags & (MF_NOCLIP|MF_NOCLIPTHING))
+		&& !(thing->flags & (MF_SOLID|MF_SPECIAL|MF_SHOOTABLE|MF_MISSILE|MF_PUSHABLE|MF_ENEMY|MF_BOSS|MF_PAIN)));
+}
+
+int rr3ds_cheapMove = -1; // rr_config: cheap_move=0 turns it off
+UINT32 rr3ds_cheapMoveN = 0;
+
+// move a decoration WITHOUT P_CheckPosition (that was the expensive part: ~100-160 us per decoration per tic).
+// Same sector = only change x/y/z. Different sector = relink. Floor/ceiling come from the sector.
+static boolean RR3DS_CheapMove(mobj_t *thing, fixed_t x, fixed_t y, fixed_t z)
+{
+	subsector_t *ss = R_PointInSubsector(x, y);
+
+	if (thing->subsector != NULL && ss->sector == thing->subsector->sector
+		&& !(thing->flags & MF_NOSECTOR) && (thing->flags & MF_NOBLOCKMAP))
+	{
+		thing->x = x;
+		thing->y = y;
+		thing->z = z;
+		thing->subsector = ss;
+	}
+	else
+	{
+		P_UnsetThingPosition(thing);
+		if (sector_list)
+		{
+			P_DelSeclist(sector_list);
+			sector_list = NULL;
+		}
+		// AMP/BLOCK/aura spawn inside the blockmap without anything colliding with them: they are taken out
+		// (so next time they take the "same sector" path).
+		thing->flags |= MF_NOBLOCKMAP;
+		thing->x = x;
+		thing->y = y;
+		thing->z = z;
+		P_SetThingPosition(thing);
+	}
+
+	thing->floorz = P_GetSectorFloorZAt(ss->sector, x, y);
+	thing->ceilingz = P_GetSectorCeilingZAt(ss->sector, x, y);
+	thing->floorrover = NULL;
+	thing->ceilingrover = NULL;
+	rr3ds_cheapMoveN++;
+	return true;
+}
+
+// effect that passes through everything (smoke, dust, sparks, trails): when moving by its momentum
+// does not need P_CheckPosition either.
+static boolean RR3DS_NoclipVisual(const mobj_t *thing)
+{
+	// bubbles (Dragonspire): NOCLIP without NOCLIPHEIGHT; floor/ceiling are still updated in CheapMove
+	const UINT32 need = (thing->type == MT_SMALLBUBBLE || thing->type == MT_MEDIUMBUBBLE)
+		? (MF_NOBLOCKMAP|MF_NOCLIP) : (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOCLIPHEIGHT);
+	return (thing->player == NULL && thing->subsector != NULL
+		&& (thing->flags & need) == need
+		&& !(thing->flags & (MF_SOLID|MF_SPECIAL|MF_SHOOTABLE|MF_MISSILE|MF_PUSHABLE|MF_ENEMY|MF_BOSS|MF_PAIN|MF_NOSECTOR)));
+}
+
+static boolean RR3DS_TryCheapMove(mobj_t *thing, fixed_t x, fixed_t y)
+{
+	if (!RR_LOWEND || !RR3DS_NoclipVisual(thing))
+		return false;
+	if (rr3ds_cheapMove < 0)
+		rr3ds_cheapMove = RRCfg_Int("cheap_move", 1);
+	if (!rr3ds_cheapMove)
+		return false;
+	return RR3DS_CheapMove(thing, x, y, thing->z);
+}
+#endif
+
 static boolean P_TeleportMove(mobj_t *thing, fixed_t x, fixed_t y, fixed_t z)
 {
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND && thing->player == NULL && thing->subsector != NULL && RR3DS_IsFollowVisual(thing))
+	{
+		if (rr3ds_cheapMove < 0)
+			rr3ds_cheapMove = RRCfg_Int("cheap_move", 1);
+		if (rr3ds_cheapMove)
+			return RR3DS_CheapMove(thing, x, y, z);
+	}
+#endif
 	boolean startingonground = P_IsObjectOnGround(thing);
 	sector_t *oldsector = thing->subsector->sector;
 
@@ -537,6 +642,15 @@ static BlockItReturn_t PIT_CheckThing(mobj_t *thing)
 	// don't clip against self
 	if (thing == g_tm.thing)
 		return BMIT_CONTINUE;
+
+	// distance rejection BEFORE the other tests (all the ones below down to
+	// the distance one only reject, with no side effects; the MF_PAPERCOLLISION ones are more
+	// strict than this one). Same result, without 5-6 calls per distant object.
+	{
+		const fixed_t bd = thing->radius + g_tm.thing->radius;
+		if (abs(thing->x - g_tm.x) >= bd || abs(thing->y - g_tm.y) >= bd)
+			return BMIT_CONTINUE;
+	}
 
 	// Ignore spectators
 	if ((g_tm.thing->player && g_tm.thing->player->spectator)
@@ -2102,6 +2216,9 @@ boolean P_CheckPosition(mobj_t *thing, fixed_t x, fixed_t y, TryMoveResult_t *re
 	boolean blockval = true;
 
 	ps_checkposition_calls++;
+#ifdef __3DS__
+	rr3ds_cpCount[thing->type]++; // who requests P_CheckPosition ([CP] in the log with diag)
+#endif
 
 	I_Assert(thing != NULL);
 #ifdef PARANOIA
@@ -3095,6 +3212,15 @@ boolean P_TryMove(mobj_t *thing, fixed_t x, fixed_t y, boolean allowdropoff, Try
 	pslope_t *oldslope = thing->standingslope;
 	sector_t *oldsector = thing->subsector->sector;
 
+#ifdef RR_LOWEND_CODE
+	if (RR3DS_TryCheapMove(thing, x, y))
+	{
+		if (result != NULL)
+			result->success = true;
+		return true;
+	}
+#endif
+
 	// Is the move OK?
 	if (increment_move(thing, x, y, allowdropoff, &stairjank, result) == false)
 	{
@@ -3294,6 +3420,11 @@ boolean P_TryMove(mobj_t *thing, fixed_t x, fixed_t y, boolean allowdropoff, Try
 boolean P_SceneryTryMove(mobj_t *thing, fixed_t x, fixed_t y, TryMoveResult_t *result)
 {
 	fixed_t tryx, tryy;
+
+#ifdef RR_LOWEND_CODE
+	if (RR3DS_TryCheapMove(thing, x, y))
+		return true;
+#endif
 
 	tryx = thing->x;
 	tryy = thing->y;

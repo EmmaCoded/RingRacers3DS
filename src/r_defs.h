@@ -737,7 +737,16 @@ struct seg_t
 	vertex_t *v1;
 	vertex_t *v2;
 
+#ifdef __3DS__
+	UINT8 side; // seg_t 80 -> 68 bytes (CityEscape: 47994 segs)
+	UINT8 dontrenderme;
+	UINT8 glseg;
+	SINT8 lightOffset; // Fake contrast calculated on level load
+	INT16 hwLightOffset;
+	UINT16 numlights;
+#else
 	INT32 side;
+#endif
 
 	fixed_t offset;
 
@@ -760,15 +769,19 @@ struct seg_t
 	lightmap_t *lightmaps; // for static lightmap
 
 	// Why slow things down by calculating lightlists for every thick side?
+#ifndef __3DS__
 	size_t numlights;
+#endif
 	r_lightlist_t *rlights;
 	polyobj_t *polyseg;
+#ifndef __3DS__
 	boolean dontrenderme;
 	boolean glseg;
 
 	// Fake contrast calculated on level load
 	SINT8 lightOffset;
 	INT16 hwLightOffset;
+#endif
 };
 
 //
@@ -885,6 +898,9 @@ struct patch_t
 
 #ifdef ROTSPRITE
 	rotsprite_t *rotated; // Rotated patches
+#endif
+#ifdef __3DS__
+	INT32 rr3ds_spr; // index+1 in ringracers_3ds_spr.bin (0 = not precomputed)
 #endif
 };
 
@@ -1037,7 +1053,14 @@ struct spriteframe_t
 	UINT16 flip;
 
 #ifdef ROTSPRITE
+#ifdef __3DS__
+	// pointer to [2][16] created only if the frame is rotated (r_patchrotation.c).
+	// Before, a fixed 128 B per frame x ~6000 frames = ~750 KB almost always NULL.
+	// The rotated[type][angle] syntax stays the same.
+	rotsprite_t *(*rotated)[16];
+#else
 	rotsprite_t *rotated[2][16]; // Rotated patches
+#endif
 #endif
 };
 

@@ -325,6 +325,21 @@ void SCR_Startup(void)
 		return;
 	}
 
+#ifdef __3DS__
+	// With render_none there is no real screen. V_Init tries to allocate framebuffers
+	// using vid.width/height, which are 0 in this mode - result: crash or hang.
+	// Registering CVARs and exiting is enough to continue the boot.
+	if (rendermode == render_none)
+	{
+		vid.modenum = 0;
+		{
+			extern struct CVarList *cvlist_screen;
+			CV_RegisterList(cvlist_screen);
+		}
+		return;
+	}
+#endif
+
 	vid.modenum = 0;
 
 	V_Init();
@@ -522,6 +537,27 @@ void SCR_CalculateFPS(void)
 #else
 	// Direct, unsampled counter.
 	averageFPS = 1.0 / frameElapsed;
+#endif
+
+#ifdef __3DS__
+	{
+		// [FPS] line to the log every ~5 s: average, minimum and maximum
+		static double acc = 0.0, minFrame = 1e9, maxFrame = 0.0;
+		static int n = 0;
+		if (frameElapsed > 0.0 && frameElapsed < 5.0)
+		{
+			acc += frameElapsed;
+			n++;
+			if (frameElapsed < minFrame) minFrame = frameElapsed;
+			if (frameElapsed > maxFrame) maxFrame = frameElapsed;
+		}
+		if (acc >= 5.0)
+		{
+			CONS_Printf("[FPS] avg=%.1f min=%.1f max=%.1f frames=%d\n",
+				n / acc, 1.0 / maxFrame, 1.0 / minFrame, n);
+			acc = 0.0; n = 0; minFrame = 1e9; maxFrame = 0.0;
+		}
+	}
 #endif
 }
 

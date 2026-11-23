@@ -35,7 +35,15 @@
 
 #define CHAIN_SIZE (52)
 
+#ifdef __3DS__
+// 3DS: Shrink spawned up to 1 poh-bee per racer + 7 extra for 1st place, each with guns,
+// lasers and dozens of chain links, and one particle per laser per tic. Keep at most 4
+// poh-bees alive (the rest are not created) and thin the particles out.
+#define EXTRA_FOR_FIRST (2)
+#define MAX_POHBEES_3DS (4)
+#else
 #define EXTRA_FOR_FIRST (7)
+#endif
 
 enum
 {
@@ -342,6 +350,15 @@ static void ShrinkLaserThinker(mobj_t *pohbee, mobj_t *gun, mobj_t *laser)
 
 		laser->spriteyscale = FixedDiv(FixedDiv(spriteHeight, mapobjectscale), laser->info->height);
 
+#ifdef __3DS__
+		if (leveltime % 3 != 0)
+		{
+			// skip the particle on 2 of every 3 tics (sound handled below)
+			if (S_SoundPlaying(laser, sfx_beam01) == false)
+				S_StartSound(laser, sfx_beam01);
+			return;
+		}
+#endif
 		particle = P_SpawnMobjFromMobj(laser, 0, 0, 0, MT_SHRINK_PARTICLE);
 
 		particle->sprxoff = P_RandomRange(PR_DECORATION, -16, 16) * laser->scale;
@@ -855,8 +872,16 @@ void Obj_CreateShrinkPohbees(player_t *owner)
 		}
 	}
 
+#ifdef __3DS__
+	UINT8 rr_made = 0;
+#endif
 	for (i = 0; i < numPohbees; i++)
 	{
+#ifdef __3DS__
+		if (rr_made >= MAX_POHBEES_3DS)
+			break;
+		rr_made++;
+#endif
 		// omg pobby hi!!!
 		CreatePohbee(owner, pohbees[i].start, pohbees[i].end, pohbees[i].lasers);
 
@@ -867,6 +892,11 @@ void Obj_CreateShrinkPohbees(player_t *owner)
 
 			for (j = 0; j < EXTRA_FOR_FIRST; j++)
 			{
+#ifdef __3DS__
+				if (rr_made >= MAX_POHBEES_3DS)
+					break;
+				rr_made++;
+#endif
 				waypoint_t *new = GetPohbeeEnd(prev);
 				CreatePohbee(owner, prev, new, 1);
 				prev = new;

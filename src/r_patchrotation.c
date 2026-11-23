@@ -223,6 +223,13 @@ patch_t *Patch_GetRotatedSprite(
 	if (rotationangle < 1 || rotationangle >= ROTANGLES)
 		return NULL;
 
+#ifdef __3DS__
+	if (sprite->rotated == NULL) // rotation table only for frames that rotate
+	{
+		sprite->rotated = Z_Calloc(2 * 16 * sizeof(rotsprite_t *), PU_STATIC, NULL);
+		if (sprite->rotated == NULL) return NULL;
+	}
+#endif
 	rotsprite = sprite->rotated[type][spriteangle];
 
 	if (rotsprite == NULL)
@@ -314,6 +321,7 @@ void RotatedPatch_DoRotation(rotsprite_t *rotsprite, patch_t *patch, INT32 angle
 	UINT16 *rawdst, *rawconv;
 	size_t size;
 	pictureflags_t bflip = (flip) ? PICFLAGS_XFLIP : 0;
+	UINT16 *rr3ds_scratch = NULL; // 3DS: fixed buffer (never freed)
 
 	INT32 width = patch->width;
 	INT32 height = patch->height;
@@ -352,8 +360,27 @@ void RotatedPatch_DoRotation(rotsprite_t *rotsprite, patch_t *patch, INT32 angle
 
 	if (xpivot != width / 2 || ypivot != height / 2)
 	{
+#ifdef __3DS__
+		// exact size around the pivot (before double it, crudely:
+		// up to 4x temporary memory). Same drawing result: the pivot
+		// stays at the buffer center and the whole rotated sprite fits.
+		INT32 i, mx = 0, my = 0;
+		const INT32 cx[4] = { -xpivot, width - xpivot, -xpivot, width - xpivot };
+		const INT32 cy[4] = { -ypivot, -ypivot, height - ypivot, height - ypivot };
+		for (i = 0; i < 4; i++)
+		{
+			const fixed_t u = cx[i] * FRACUNIT, v = cy[i] * FRACUNIT;
+			const INT32 x = abs(FixedInt(FixedMul(u, ca) - FixedMul(v, sa))) + 2;
+			const INT32 y = abs(FixedInt(FixedMul(u, sa) + FixedMul(v, ca))) + 2;
+			if (x > mx) mx = x;
+			if (y > my) my = y;
+		}
+		newwidth = 2 * mx;
+		newheight = 2 * my;
+#else
 		newwidth *= 2;
 		newheight *= 2;
+#endif
 	}
 
 	minx = newwidth;
@@ -365,7 +392,23 @@ void RotatedPatch_DoRotation(rotsprite_t *rotsprite, patch_t *patch, INT32 angle
 	size = (newwidth * newheight);
 	if (!size)
 		size = (width * height);
+#ifdef __3DS__
+	// 3DS: crash at r_patchrotation.c:368 (requesting 177 KB with a chopped-up heap).
+	// Fixed 256 KB temporary buffer (bss): it is not requested or released on every rotation.
+	{
+		// 256 KB again (with 128 KB it requested 198 KB separately and crashed on Sealed Star).
+		// If a rotation does not fit even so: that frame is NOT rotated (the sprite is drawn upright) instead of
+		// requesting hundreds of contiguous KB with a chopped-up heap and closing the game.
+		static UINT16 rr3ds_rotscratch[128*1024];
+		rr3ds_scratch = rr3ds_rotscratch;
+		if (size > sizeof(rr3ds_rotscratch)/sizeof(UINT16))
+			return;
+		rawdst = rr3ds_rotscratch;
+		memset(rawdst, 0, size * sizeof(UINT16));
+	}
+#else
 	rawdst = Z_Calloc(size * sizeof(UINT16), PU_STATIC, NULL);
+#endif
 
 	for (dy = 0; dy < newheight; dy++)
 	{
@@ -424,7 +467,8 @@ void RotatedPatch_DoRotation(rotsprite_t *rotsprite, patch_t *patch, INT32 angle
 		ox -= minx;
 		oy -= miny;
 
-		Z_Free(rawdst);
+		if (rawdst != rr3ds_scratch)
+			Z_Free(rawdst);
 	}
 	else
 	{
@@ -436,9 +480,14 @@ void RotatedPatch_DoRotation(rotsprite_t *rotsprite, patch_t *patch, INT32 angle
 	// make patch
 	rotated = (patch_t *)Picture_Convert(PICFMT_FLAT16, rawconv, PICFMT_PATCH, 0, NULL, width, height, 0, 0, 0);
 
+#ifdef __3DS__
+	// 3DS: count how much the rotated sprites take up; d_main empties them between frames if they pass the cap.
+	{ extern size_t rr3ds_rotbytes; rr3ds_rotbytes += (size_t)width * height + 64; }
+#endif
 	Z_ChangeTag(rotated, PU_PATCH_ROTATED);
 	Z_SetUser(rotated, (void **)(&rotsprite->patches[idx]));
-	Z_Free(rawconv);
+	if (rawconv != rr3ds_scratch)
+		Z_Free(rawconv);
 
 	rotated->leftoffset = ox;
 	rotated->topoffset = oy;

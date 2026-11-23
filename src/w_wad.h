@@ -94,6 +94,9 @@ struct virtres_t {
 
 virtres_t* vres_GetMap(lumpnum_t);
 void vres_Free(virtres_t*);
+#ifdef __3DS__
+void vres_FreeLumpData(virtres_t *vres, const char *name);
+#endif
 virtlump_t* vres_Find(const virtres_t*, const char*);
 void* vres_GetPatch(virtlump_t *vlump, INT32 tag);
 

@@ -487,6 +487,15 @@ struct precipmobj_t
 
 // It's extremely important that all mobj_t*-reading code have access to this.
 boolean P_MobjWasRemoved(const mobj_t *th);
+#if defined(__3DS__) && !defined(RR_P_MOBJ_C)
+// inline version (called ~30,000 times per tic; it only compares a pointer)
+void P_MobjThinker(mobj_t *mobj);
+#define P_MobjWasRemoved(m) RR3DS_MobjWasRemovedI(m)
+static inline boolean RR3DS_MobjWasRemovedI(const mobj_t *m)
+{
+	return !(m && m->thinker.function.acp1 == (actionf_p1)P_MobjThinker);
+}
+#endif
 
 struct actioncache_t
 {
@@ -531,6 +540,7 @@ void P_SpawnItemPattern(mapthing_t *mthing);
 void P_SpawnItemLine(mapthing_t *mt1, mapthing_t *mt2);
 void P_SpawnHoopOfSomething(fixed_t x, fixed_t y, fixed_t z, fixed_t radius, INT32 number, mobjtype_t type, angle_t rotangle);
 void P_SpawnPrecipitation(void);
+void RR3DS_PrecipFollow(void); // rain that follows the camera (low-end / 3DS)
 void P_SpawnParaloop(fixed_t x, fixed_t y, fixed_t z, fixed_t radius, INT32 number, mobjtype_t type, statenum_t nstate, angle_t rotangle, boolean spawncenter);
 void *P_CreateFloorSpriteSlope(mobj_t *mobj);
 void P_RemoveFloorSpriteSlope(mobj_t *mobj);

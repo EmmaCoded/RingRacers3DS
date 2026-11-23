@@ -35,7 +35,11 @@
 // and true level loading and clean up all of the
 // global variable garbage it uses ... but I stopped
 // myself. So here's code duplication hell instead.
+#ifdef __3DS__
+static UINT32 *g_rankCapsules_mapthingsPos = NULL; // 256 KB only while counting
+#else
 static UINT32 g_rankCapsules_mapthingsPos[UINT16_MAX];
+#endif
 static size_t g_rankCapsules_nummapthings = 0;
 static boolean g_rankCapsules_udmf = false;
 static UINT32 g_rankCapsules_count = 0;
@@ -272,10 +276,22 @@ static UINT32 RankCapsules_CountFromMap(const INT32 cupLevelNum)
 	g_rankCapsules_udmf = (textmap != NULL);
 	g_rankCapsules_count = 0;
 
+#ifdef __3DS__
+	g_rankCapsules_mapthingsPos = (UINT32 *)malloc(UINT16_MAX * sizeof(UINT32));
+	if (g_rankCapsules_mapthingsPos == NULL)
+	{
+		vres_Free(virt);
+		return 0;
+	}
+#endif
 	if (RankCapsules_LoadMapData(virt) == false)
 	{
 		g_rankCapsules_count = 0;
 	}
+#ifdef __3DS__
+	free(g_rankCapsules_mapthingsPos);
+	g_rankCapsules_mapthingsPos = NULL;
+#endif
 
 	vres_Free(virt);
 

@@ -13,6 +13,7 @@
 /// \brief Archiving: SaveGame I/O, Thinker, Ticker
 
 #include "d_think.h"
+#include "rr_config.h"  // single-file configuration
 #include "doomstat.h"
 #include "d_main.h"
 #include "g_game.h"
@@ -561,13 +562,161 @@ mobj_t *P_SetTarget2(mobj_t **mop, mobj_t *targ
 // Rewritten to delete nodes implicitly, by making currentthinker
 // external and using P_RemoveThinkerDelayed() implicitly.
 //
+#ifdef __3DS__
+// Per-mobj-type profile: time and count per MT_ in the THINK_MOBJ list.
+static UINT64 rr3ds_mtTime[NUMMOBJTYPES];
+static UINT32 rr3ds_mtCount[NUMMOBJTYPES];
+// breakdown of MT_THOK by state (who spawns them)
+#define RR3DS_THOKSLOTS 24
+static INT32 rr3ds_thokState[RR3DS_THOKSLOTS];
+static UINT64 rr3ds_thokTime[RR3DS_THOKSLOTS];
+static UINT32 rr3ds_thokCount[RR3DS_THOKSLOTS];
+static void rr3ds_ThokAdd(INT32 st, UINT64 dt)
+{
+	int i;
+	for (i = 0; i < RR3DS_THOKSLOTS; i++)
+	{
+		if (rr3ds_thokCount[i] == 0) rr3ds_thokState[i] = st;
+		if (rr3ds_thokState[i] == st) { rr3ds_thokTime[i] += dt; rr3ds_thokCount[i]++; return; }
+	}
+}
+int RR3DS_DiagOn(void); // hw_main.cpp 
+// MK7: counters defined in p_mobj.c
+extern UINT32 rr3ds_mk7_ringFast, rr3ds_mk7_floatSkip, rr3ds_mk7_scenSkip,
+	rr3ds_mk7_capsNoLink, rr3ds_mk7_tripSkip;
+static void rr3ds_RunMobjListProfiled(void)
+{
+	for (currentthinker = thlist[THINK_MOBJ].next; currentthinker != &thlist[THINK_MOBJ]; currentthinker = currentthinker->next)
+	{
+		if (currentthinker->rr3ds_sleep
+			&& currentthinker->function.acp1 == (actionf_p1)P_MobjThinker
+			&& ((leveltime + (UINT32)((uintptr_t)currentthinker >> 6)) & 31)) /* check 1 of 32 (before 8) */
+		{
+			rr3ds_ringSlept++; // sleeping ring
+			continue;
+		}
+		if (currentthinker->function.acp1 == (actionf_p1)P_MobjThinker)
+		{
+			const mobjtype_t t = ((mobj_t *)currentthinker)->type;
+			const INT32 st = (t == MT_THOK && ((mobj_t *)currentthinker)->state)
+				? (INT32)(((mobj_t *)currentthinker)->state - states) : -1;
+			const UINT64 t0 = I_GetPreciseTime();
+			currentthinker->function.acp1(currentthinker);
+			if ((unsigned)t < NUMMOBJTYPES)
+			{
+				if (st >= 0) rr3ds_ThokAdd(st, I_GetPreciseTime() - t0);
+				rr3ds_mtTime[t] += I_GetPreciseTime() - t0;
+				rr3ds_mtCount[t]++;
+			}
+		}
+		else
+			currentthinker->function.acp1(currentthinker);
+	}
+}
+
+static void rr3ds_ReportMobjTypes(UINT32 ntics)
+{
+	enum { TOP = 45 }; // 15 -> 45 (see the tail, not just the first ones)
+	int best[TOP]; int k, j; size_t t;
+	const double us = 1000000.0 / (double)I_GetPrecisePrecision() / ntics;
+	UINT32 total = 0;
+	for (k = 0; k < TOP; k++) best[k] = -1;
+	for (t = 0; t < NUMMOBJTYPES; t++)
+	{
+		total += rr3ds_mtCount[t];
+		if (!rr3ds_mtTime[t]) continue;
+		for (k = 0; k < TOP; k++)
+		{
+			if (best[k] < 0 || rr3ds_mtTime[t] > rr3ds_mtTime[best[k]])
+			{
+				for (j = TOP - 1; j > k; j--) best[j] = best[j - 1];
+				best[k] = (int)t;
+				break;
+			}
+		}
+	}
+	CONS_Printf("[MT] top types (us/tic, count/tic) | mobjs/tic=%u\n", (unsigned)(total / ntics));
+	for (k = 0; k < TOP && best[k] >= 0; k++)
+	{
+		// MK7: print the type number (MOBJTYPE_LIST seems misaligned with info.h)
+		// and doomednum/spawnstate to identify it without trusting the name.
+		const char *nm = (best[k] >= 0 && best[k] < NUMMOBJTYPES) ? MOBJTYPE_LIST[best[k]] : NULL;
+		CONS_Printf("[MT]  #%-4d %-26s dn=%-5d st=%-5d fl=%08lx %6.0f us  %5u\n", best[k],
+			nm ? nm : "?", (int)mobjinfo[best[k]].doomednum, (int)mobjinfo[best[k]].spawnstate, (unsigned long)mobjinfo[best[k]].flags,
+			rr3ds_mtTime[best[k]] * us, (unsigned)(rr3ds_mtCount[best[k]] / ntics));
+	}
+	for (k = 0; k < RR3DS_THOKSLOTS && rr3ds_thokCount[k]; k++)
+		if (rr3ds_thokTime[k] * us >= 100.0)
+			CONS_Printf("[THOK] state=%ld %6.0f us %5u\n", (long)rr3ds_thokState[k],
+				rr3ds_thokTime[k] * us, (unsigned)(rr3ds_thokCount[k] / ntics));
+	{ // [CP] types that request P_CheckPosition the most
+		extern UINT32 rr3ds_cpCount[NUMMOBJTYPES];
+		extern UINT32 rr3ds_cheapMoveN;
+		int n;
+		CONS_Printf("[CP] cheap_move=%u per tic\n", (unsigned)(rr3ds_cheapMoveN / ntics));
+		rr3ds_cheapMoveN = 0;
+		for (n = 0; n < 14; n++)
+		{
+			int bt = -1;
+			for (t = 0; t < NUMMOBJTYPES; t++)
+				if (rr3ds_cpCount[t] && (bt < 0 || rr3ds_cpCount[t] > rr3ds_cpCount[bt])) bt = (int)t;
+			if (bt < 0) break;
+			CONS_Printf("[CP]  #%-4d %-26s %6.1f per tic\n", bt, MOBJTYPE_LIST[bt], (double)rr3ds_cpCount[bt] / (double)ntics);
+			rr3ds_cpCount[bt] = 0;
+		}
+		memset(rr3ds_cpCount, 0, sizeof rr3ds_cpCount);
+	}
+	memset(rr3ds_thokCount, 0, sizeof rr3ds_thokCount);
+	memset(rr3ds_thokTime, 0, sizeof rr3ds_thokTime);
+	memset(rr3ds_mtTime, 0, sizeof rr3ds_mtTime);
+	memset(rr3ds_mtCount, 0, sizeof rr3ds_mtCount);
+}
+#endif
+
 static void P_RunThinkers(void)
 {
 	size_t i;
 
+#ifdef RR_LOWEND_CODE
+	{
+		static int wasRead = 0;
+		if (!wasRead) { wasRead = 1; rr3ds_ringSleepOn = RRCfg_Int("sleeping_rings", 1); rr3ds_farSleepOn = RRCfg_Int("far_sleep", 1); { extern int rr3ds_flingNoCol; rr3ds_flingNoCol = RRCfg_Int("fling_nocol", 1); } }
+	}
+#endif
 	for (i = 0; i < NUM_ACTIVETHINKERLISTS; i++)
 	{
 		ps_thlist_times[i] = I_GetPreciseTime();
+#ifdef __3DS__
+		if (i == THINK_MOBJ && RR3DS_DiagOn()) // per-mobj profile ONLY with diagnostics (it cost 1.5-4 ms per tic)
+		{
+			rr3ds_RunMobjListProfiled();
+			ps_thlist_times[i] = I_GetPreciseTime() - ps_thlist_times[i];
+			continue;
+		}
+#endif
+#ifdef RR_LOWEND_CODE
+		if (i == THINK_MOBJ && RR_LOWEND) // on PC only in low-end mode
+		{
+			// sleeping rings (data only): skipped without calling the thinker.
+			// 1 of every 8 tics (staggered) they are checked anyway for safety.
+			for (currentthinker = thlist[i].next; currentthinker != &thlist[i]; currentthinker = currentthinker->next)
+			{
+				if (currentthinker->rr3ds_sleep
+					&& currentthinker->function.acp1 == (actionf_p1)P_MobjThinker
+					&& ((leveltime + (UINT32)((uintptr_t)currentthinker >> 6)) & 31)) /* check 1 of 32 (before 8) */
+				{
+					rr3ds_ringSlept++;
+#ifndef __3DS__
+					RR3DS_RingSyncFrame((mobj_t *)currentthinker); // PC: Software does not do this when drawing
+#endif
+					continue;
+				}
+				currentthinker->function.acp1(currentthinker);
+			}
+			ps_thlist_times[i] = I_GetPreciseTime() - ps_thlist_times[i];
+			continue;
+		}
+#endif
 		for (currentthinker = thlist[i].next; currentthinker != &thlist[i]; currentthinker = currentthinker->next)
 		{
 #ifdef PARANOIA
@@ -712,15 +861,318 @@ static void P_StartLevelMusic(void)
 	}
 }
 
+#ifdef __3DS__
+// ==========================================================================
+// 3DS: BENCH MODE. If sdmc:/3ds/rr_bench exists the game starts by itself
+// on the map and the camera drives the track following the waypoints (no
+// kart physics). After completing 1 lap it writes [BENCH] and exits.
+// ==========================================================================
+boolean rr3ds_bench = false;
+static waypoint_t *rr_bwp = NULL, *rr_bfinish = NULL;
+static fixed_t rr_bdist = 0;
+static UINT32 rr_btics = 0;
+static size_t rr_bframe0 = 0;
+static precise_t rr_bt0 = 0;
+static boolean rr_bstarted = false;
+
+// [WORST]: worst case per map for the per-tic ms BUDGET.
+// Only collects data while the bench is running. 1 ms histograms (cap 1023).
+// tic = whole P_Ticker (logic); frame = a full pass of D_SRB2Loop; draw = D_Display.
+// worst_sec = worst average of 35 consecutive tics (1 s of gameplay): the sustained value, not an isolated spike.
+#define RR_PH 1024
+static UINT16 rr_ph_tic[RR_PH], rr_ph_frm[RR_PH], rr_ph_dib[RR_PH];
+static double rr_pt_sum, rr_pt_max, rr_pf_sum, rr_pf_max, rr_pd_sum, rr_pd_max;
+static UINT32 rr_pt_n, rr_pf_n;
+static double rr_pw[TICRATE], rr_pw_sum, rr_pw_max; static UINT32 rr_pw_i;
+static UINT32 rr_pm_max, rr_pm_sum, rr_pm_n;
+static precise_t rr_p_last; // last partial [WORST]
+
+static void RR3DS_WorstReset(void)
+{
+	memset(rr_ph_tic, 0, sizeof rr_ph_tic); memset(rr_ph_frm, 0, sizeof rr_ph_frm); memset(rr_ph_dib, 0, sizeof rr_ph_dib);
+	rr_pt_sum = rr_pt_max = rr_pf_sum = rr_pf_max = rr_pd_sum = rr_pd_max = 0;
+	rr_pt_n = rr_pf_n = 0;
+	memset(rr_pw, 0, sizeof rr_pw); rr_pw_sum = rr_pw_max = 0; rr_pw_i = 0;
+	rr_pm_max = rr_pm_sum = rr_pm_n = 0;
+	rr_p_last = I_GetPreciseTime();
+}
+
+static void rr_ph_add(UINT16 *h, double ms)
+{
+	int b = (int)ms;
+	if (b < 0) b = 0;
+	if (b >= RR_PH) b = RR_PH - 1;
+	if (h[b] < 0xFFFF) h[b]++;
+}
+
+static int rr_ph_pct(const UINT16 *h, UINT32 n, int pct)
+{
+	UINT32 meta = (UINT32)(((UINT64)n * pct + 99) / 100), acc = 0;
+	int b;
+	if (!n) return 0;
+	for (b = 0; b < RR_PH; b++) { acc += h[b]; if (acc >= meta) return b + 1; }
+	return RR_PH;
+}
+
+static void RR3DS_WorstPrint(const char *que)
+{
+	CONS_Printf("[WORST] %s map=%s tics=%u tic_ms avg=%.1f p95=%d p99=%d max=%.1f worst_sec=%.1f"
+		" | frame_ms avg=%.1f p95=%d max=%.1f | draw_ms avg=%.1f p95=%d max=%.1f | mobjs avg=%u max=%u\n",
+		que, G_BuildMapName(gamemap), (unsigned)rr_pt_n,
+		rr_pt_n ? rr_pt_sum / rr_pt_n : 0.0, rr_ph_pct(rr_ph_tic, rr_pt_n, 95), rr_ph_pct(rr_ph_tic, rr_pt_n, 99), rr_pt_max,
+		rr_pw_max / TICRATE,
+		rr_pf_n ? rr_pf_sum / rr_pf_n : 0.0, rr_ph_pct(rr_ph_frm, rr_pf_n, 95), rr_pf_max,
+		rr_pf_n ? rr_pd_sum / rr_pf_n : 0.0, rr_ph_pct(rr_ph_dib, rr_pf_n, 95), rr_pd_max,
+		rr_pm_n ? rr_pm_sum / rr_pm_n : 0, rr_pm_max);
+}
+
+// Called at the end of P_Ticker (only if run)
+static void RR3DS_WorstTic(double ms)
+{
+	if (!rr3ds_bench || !rr_bstarted) return;
+	rr_ph_add(rr_ph_tic, ms);
+	rr_pt_sum += ms; rr_pt_n++;
+	if (ms > rr_pt_max) rr_pt_max = ms;
+	rr_pw_sum += ms - rr_pw[rr_pw_i]; rr_pw[rr_pw_i] = ms;
+	rr_pw_i = (rr_pw_i + 1) % TICRATE;
+	if (rr_pt_n >= TICRATE && rr_pw_sum > rr_pw_max) rr_pw_max = rr_pw_sum;
+	if (rr_pt_n % TICRATE == 0)
+	{
+		// how many mobjs there are (once per game second, cheap)
+		thinker_t *th; UINT32 c = 0;
+		for (th = thlist[THINK_MOBJ].next; th != &thlist[THINK_MOBJ]; th = th->next)
+			if (th->function.acp1 != (actionf_p1)P_RemoveThinkerDelayed) c++;
+		rr_pm_sum += c; rr_pm_n++;
+		if (c > rr_pm_max) rr_pm_max = c;
+	}
+	// partial every ~30 real seconds (if Azahar hangs or is slow, the script uses the latest)
+	if ((double)(I_GetPreciseTime() - rr_p_last) / (double)I_GetPrecisePrecision() > 30.0)
+	{
+		rr_p_last = I_GetPreciseTime();
+		RR3DS_WorstPrint("partial");
+	}
+}
+
+// Called from D_SRB2Loop (d_main.cpp) for every complete frame
+void RR3DS_WorstFrame(double total_ms, double draw_ms)
+{
+	if (!rr3ds_bench || !rr_bstarted) return;
+	rr_ph_add(rr_ph_frm, total_ms); rr_ph_add(rr_ph_dib, draw_ms);
+	rr_pf_sum += total_ms; rr_pd_sum += draw_ms; rr_pf_n++;
+	if (total_ms > rr_pf_max) rr_pf_max = total_ms;
+	if (draw_ms > rr_pd_max) rr_pd_max = draw_ms;
+}
+
+// 7 s wait standing still (black zone card) and N consecutive races
+// (sdmc:/3ds/RingRacers3ds/rr_laps, default 1) before closing.
+static UINT32 rr_bwait = 0;
+static int rr_benchLaps = 0, rr_benchDone = 0;
+
+static void RR3DS_BenchTick(void)
+{
+	player_t *p = &players[consoleplayer];
+	mobj_t *mo = p->mo;
+	waypoint_t *next;
+	fixed_t ax, ay, az, bx, by, bz, seg, t;
+
+	if (!rr3ds_bench || gamestate != GS_LEVEL || !mo || P_MobjWasRemoved(mo))
+		return;
+
+	if (!rr_bstarted)
+	{
+		if (rr_benchLaps == 0)
+		{
+			rr_benchLaps = RRCfg_Int("laps", 1); // rr_config.txt
+			if (rr_benchLaps < 1) rr_benchLaps = 1;
+			if (rr_benchLaps > 10) rr_benchLaps = 10;
+		}
+		if (rr_bwait < 7 * TICRATE)
+		{
+			rr_bwait++; // standing still while the zone card shows
+			mo->momx = mo->momy = mo->momz = 0;
+			return;
+		}
+		rr_bfinish = K_GetFinishLineWaypoint();
+		if (!rr_bfinish || !rr_bfinish->mobj || rr_bfinish->numnextwaypoints == 0)
+			return;
+		rr_bwp = rr_bfinish;
+		rr_bdist = 0;
+		rr_btics = 0;
+		rr_bframe0 = framecount;
+		rr_bt0 = I_GetPreciseTime(); { extern UINT32 rr3ds_dbg_real, rr3ds_dbg_cap; rr3ds_dbg_real = 0; rr3ds_dbg_cap = 0; }
+		RR3DS_WorstReset();
+		rr_bstarted = true;
+		CONS_Printf("[BENCH] start on %s (race %d of %d)\n", G_BuildMapName(gamemap), rr_benchDone + 1, rr_benchLaps);
+	}
+
+	// in special stages the path can break (waypoint without a next
+	// or without a mobj) -> before it read NULL (Unmapped Read in Azahar). Now it ends the bench.
+	if (!rr_bwp || !rr_bwp->mobj || rr_bwp->numnextwaypoints == 0 || !rr_bwp->nextwaypoints)
+		goto bench_fin;
+	next = rr_bwp->nextwaypoints[0];
+	if (!next || !next->mobj)
+		goto bench_fin;
+
+	ax = rr_bwp->mobj->x; ay = rr_bwp->mobj->y; az = rr_bwp->mobj->z;
+	bx = next->mobj->x;   by = next->mobj->y;   bz = next->mobj->z;
+	seg = R_PointToDist2(ax, ay, bx, by);
+
+	rr_bdist += 48 * mapobjectscale; // ~race speed
+	while (seg > 0 && rr_bdist >= seg)
+	{
+		rr_bdist -= seg;
+		rr_bwp = next;
+		if (rr_bwp == rr_bfinish || rr_btics > 35*240)
+		{
+bench_fin:
+			{
+			const double secs = (double)(I_GetPreciseTime() - rr_bt0) / (double)I_GetPrecisePrecision();
+			const UINT32 frames = (UINT32)(framecount - rr_bframe0);
+			CONS_Printf("[BENCH] end: tics=%u frames=%u seconds=%.1f avg_fps=%.2f ms_per_frame=%.1f\n",
+				(unsigned)rr_btics, (unsigned)frames, secs, frames / secs, secs * 1000.0 / (frames ? frames : 1));
+			{ extern UINT32 rr3ds_dbg_real, rr3ds_dbg_cap; CONS_Printf("[TICLOSS] tics_requested=%u frames>8tics=%u\n", (unsigned)rr3ds_dbg_real, (unsigned)rr3ds_dbg_cap); }
+			RR3DS_WorstPrint("fin");
+			{ extern void RR3DS_PreSave(void); RR3DS_PreSave(); }
+			rr_benchDone++;
+			if (rr_benchDone < rr_benchLaps && rr_bfinish && rr_bfinish->mobj)
+			{
+				// another unfinished race: go back to the finish line and measure again
+				rr_bstarted = false;
+				return;
+			}
+			rr3ds_bench = false;
+			I_Quit();
+			return;
+			}
+		}
+		if (!rr_bwp->mobj || rr_bwp->numnextwaypoints == 0 || !rr_bwp->nextwaypoints
+			|| !rr_bwp->nextwaypoints[0] || !rr_bwp->nextwaypoints[0]->mobj)
+		{
+			CONS_Printf("[BENCH] waypoint path cut; ending here\n");
+			goto bench_fin;
+		}
+		next = rr_bwp->nextwaypoints[0];
+		ax = rr_bwp->mobj->x; ay = rr_bwp->mobj->y; az = rr_bwp->mobj->z;
+		bx = next->mobj->x;   by = next->mobj->y;   bz = next->mobj->z;
+		seg = R_PointToDist2(ax, ay, bx, by);
+	}
+
+	t = seg > 0 ? FixedDiv(rr_bdist, seg) : 0;
+	{
+		const fixed_t x = ax + FixedMul(bx - ax, t);
+		const fixed_t y = ay + FixedMul(by - ay, t);
+		const fixed_t z = az + FixedMul(bz - az, t);
+		const angle_t ang = R_PointToAngle2(ax, ay, bx, by);
+		if (rr_btics == 0) P_SetOrigin(mo, x, y, z);
+		else P_MoveOrigin(mo, x, y, z);
+		mo->momx = mo->momy = mo->momz = 0;
+		mo->angle = ang;
+		p->angleturn = ang;
+		p->drawangle = ang;
+	}
+	rr_btics++;
+}
+
+// OFF (manual) mode. You play; when the race starts a fixed item is given;
+// measured from the start until 1 lap is completed, [BENCH] is written and it exits.
+#include <strings.h>
+boolean rr3ds_benchmanual = false;
+static SINT8 rr_bitem = KITEM_SNEAKER;
+static UINT8 rr_bitemamt = 1;
+static boolean rr_bgave = false;
+
+void RR3DS_BenchSetItem(const char *name)
+{
+	static const struct { const char *n; SINT8 v; } tbl[] = {
+#define FOREACH( name, n ) { #name, n }
+		KART_ITEM_ITERATOR,
+#undef FOREACH
+	};
+	size_t i;
+	for (i = 0; i < sizeof(tbl)/sizeof(tbl[0]); i++)
+	{
+		if (!strcasecmp(tbl[i].n, name))
+		{
+			rr_bitem = tbl[i].v;
+			return;
+		}
+	}
+	CONS_Printf("[BENCH] unknown item '%s', using SNEAKER\n", name);
+	rr_bitem = KITEM_SNEAKER;
+}
+
+static void RR3DS_BenchManualTick(void)
+{
+	player_t *p = &players[consoleplayer];
+	mobj_t *mo = p->mo;
+
+	if (!rr3ds_benchmanual || gamestate != GS_LEVEL || !mo || P_MobjWasRemoved(mo))
+		return;
+
+	// fixed item at race start
+	if (!rr_bgave && leveltime >= starttime)
+	{
+		if (rr_bitem > KITEM_NONE)
+		{
+			p->itemtype = rr_bitem;
+			p->itemamount = rr_bitemamt;
+		}
+		rr_bgave = true;
+	}
+
+	if (!rr_bstarted)
+	{
+		if (leveltime < starttime)
+			return;
+		rr_btics = 0;
+		rr_bframe0 = framecount;
+		rr_bt0 = I_GetPreciseTime(); { extern UINT32 rr3ds_dbg_real, rr3ds_dbg_cap; rr3ds_dbg_real = 0; rr3ds_dbg_cap = 0; }
+		rr_bstarted = true;
+		CONS_Printf("[BENCH] manual start on %s\n", G_BuildMapName(gamemap));
+	}
+
+	rr_btics++;
+
+	// end: complete the 1st lap (laps becomes 2) or finish the race
+	if (p->laps >= 2 || p->exiting)
+	{
+		const double secs = (double)(I_GetPreciseTime() - rr_bt0) / (double)I_GetPrecisePrecision();
+		const UINT32 frames = (UINT32)(framecount - rr_bframe0);
+		CONS_Printf("[BENCH] end (manual): tics=%u frames=%u seconds=%.1f avg_fps=%.2f ms_per_frame=%.1f\n",
+			(unsigned)rr_btics, (unsigned)frames, secs, frames / secs, secs * 1000.0 / (frames ? frames : 1));
+		rr3ds_benchmanual = false;
+		I_Quit();
+	}
+}
+#endif
+
 //
 // P_Ticker
 //
+#ifdef __3DS__
+// time per P_Ticker segment (us/tic in the [TIC] seg=)
+static precise_t rr_seg[9], rr_segLast;
+#define RR_SEG(k) do { precise_t n_ = I_GetPreciseTime(); rr_seg[k] += n_ - rr_segLast; rr_segLast = n_; } while (0)
+#else
+#define RR_SEG(k) ((void)0)
+#endif
+
+#ifdef __3DS__
+UINT64 rr3ds_m_ptick = 0; // [METER]: time inside P_Ticker (read/zeroed in d_main.cpp)
+#endif
+
 void P_Ticker(boolean run)
 {
 	quake_t *quake = NULL;
 	INT32 i;
+#ifdef __3DS__
+	const precise_t rr_pt0 = I_GetPreciseTime(); // total P_Ticker time
+#endif
 
 	thinkersCompleted = false;
+#ifdef __3DS__
+	rr_segLast = rr_pt0;
+#endif
 
 	// Increment jointime and quittime even if paused
 	for (i = 0; i < MAXPLAYERS; i++)
@@ -791,7 +1243,9 @@ void P_Ticker(boolean run)
 
 		ps_playerthink_time = I_GetPreciseTime();
 
+		RR_SEG(0);
 		K_UpdateAllPlayerPositions();
+		RR_SEG(1);
 
 		// OK! Now that we got all of that sorted, players can think!
 		for (i = 0; i < MAXPLAYERS; i++)
@@ -803,6 +1257,7 @@ void P_Ticker(boolean run)
 		}
 
 		ps_playerthink_time = I_GetPreciseTime() - ps_playerthink_time;
+		RR_SEG(2);
 
 		if (gamedata && gamestate == GS_LEVEL && !demo.playback)
 		{
@@ -922,13 +1377,20 @@ void P_Ticker(boolean run)
 				|| gamedata->deferredsave
 			)
 			{
+#ifdef __3DS__
+				// saving mid-race = a ~2 s stall on the 3DS.
+				// It is flagged and saved when the map finishes (G_DoCompleted / exit to menu).
+				gamedata->deferredsave = true;
+#else
 				G_SaveGameData();
+#endif
 			}
 		}
 	}
 
 	if (run)
 	{
+		RR_SEG(2);
 		ps_thinkertime = I_GetPreciseTime();
 		P_RunThinkers();
 		ps_thinkertime = I_GetPreciseTime() - ps_thinkertime;
@@ -1059,16 +1521,79 @@ void P_Ticker(boolean run)
 
 	if (run)
 		UpdateChallenges();
+	RR_SEG(4);
 
 	// Run shield positioning
 	P_RunOverlays();
+	RR_SEG(5);
 
 	P_UpdateSpecials();
+	RR_SEG(6);
 	P_RespawnSpecials();
+	RR_SEG(7);
 
 	// Lightning, rain sounds, etc.
 	P_PrecipitationEffects();
+	RR_SEG(8);
 
+#ifdef __3DS__
+	// Logic profile: average per tic every 175 tics.
+	if (run)
+	{
+		static precise_t acc[NUM_ACTIVETHINKERLISTS], accPlayer, accThink, accAcs, accLua, accPtick;
+		static UINT32 accCheckpos, accHooks, n;
+		size_t li;
+		for (li = 0; li < NUM_ACTIVETHINKERLISTS; li++) acc[li] += ps_thlist_times[li];
+		accPlayer += ps_playerthink_time; accThink += ps_thinkertime;
+		accAcs += ps_acs_time; accLua += ps_lua_thinkframe_time; accPtick += I_GetPreciseTime() - rr_pt0;
+		RR3DS_WorstTic((double)(I_GetPreciseTime() - rr_pt0) * 1000.0 / (double)I_GetPrecisePrecision());
+		rr3ds_m_ptick += I_GetPreciseTime() - rr_pt0; // [METER]
+		accCheckpos += ps_checkposition_calls; accHooks += ps_lua_mobjhooks;
+		if (++n >= 175)
+		{
+			const double us = 1000000.0 / (double)I_GetPrecisePrecision() / n;
+			char buf[160]; size_t o = 0;
+			for (li = 0; li < NUM_ACTIVETHINKERLISTS && o < sizeof buf - 16; li++)
+				o += snprintf(buf + o, sizeof buf - o, " L%u=%.0f", (unsigned)li, acc[li] * us);
+			CONS_Printf("[TIC] us/tic: players=%.0f thinkers=%.0f (%s ) acs=%.0f luaframe=%.0f | checkpos=%u luahooks=%u ptick=%.0f per tic | seg pre=%.0f post=%.0f play+gd=%.0f (n/a=%.0f) thk+post+chal=%.0f ovl=%.0f upd=%.0f resp=%.0f precip=%.0f\n",
+				accPlayer * us, accThink * us, buf, accAcs * us, accLua * us,
+				(unsigned)(accCheckpos / n), (unsigned)(accHooks / n), accPtick * us,
+					rr_seg[0] * us, rr_seg[1] * us, rr_seg[2] * us, rr_seg[3] * us, rr_seg[4] * us, rr_seg[5] * us, rr_seg[6] * us, rr_seg[7] * us, rr_seg[8] * us);
+				memset(rr_seg, 0, sizeof rr_seg);
+			if (RR3DS_DiagOn()) rr3ds_ReportMobjTypes(n);
+#ifdef RR_PROF
+			{ extern void RR3DS_ProfReport(unsigned); RR3DS_ProfReport(n); }
+#endif
+			// MK7: per-tic averages of the shortcuts (diagnostics only)
+			if (RR3DS_DiagOn())
+				CONS_Printf("[MK7] per tic: far=%u asleep=%u rings=%u float=%u scenery=%u capsule=%u tripwire=%u\n",
+					(unsigned)(rr3ds_farSlept / n), (unsigned)(rr3ds_ringSlept / n), (unsigned)(rr3ds_mk7_ringFast / n), (unsigned)(rr3ds_mk7_floatSkip / n),
+					(unsigned)(rr3ds_mk7_scenSkip / n), (unsigned)(rr3ds_mk7_capsNoLink / n),
+					(unsigned)(rr3ds_mk7_tripSkip / n));
+			rr3ds_ringSlept = rr3ds_farSlept = 0;
+			rr3ds_mk7_ringFast = rr3ds_mk7_floatSkip = rr3ds_mk7_scenSkip = 0;
+			rr3ds_mk7_capsNoLink = rr3ds_mk7_tripSkip = 0;
+			memset(acc, 0, sizeof acc);
+			accPlayer = accThink = accAcs = accLua = accPtick = 0; accCheckpos = accHooks = n = 0;
+		}
+	}
+#endif
+#ifdef __3DS__
+	// [BOTS] every 5 s (diag=1): speed, distance to finish and "stuck" counters of each bot.
+	if (run && gamestate == GS_LEVEL && (leveltime % 175) == 0 && leveltime > starttime && RRCfg_On("diag"))
+	{
+		for (INT32 bi = 0; bi < MAXPLAYERS; bi++)
+		{
+			const player_t *bp = &players[bi];
+			if (!playeringame[bi] || !bp->bot || !bp->mo || bp->spectator) continue;
+			RR_DIAGPRINT("[BOTS] t=%u p%d pos=%d vel=%d dist=%u respconf=%u turnconf=%d spinconf=%u buttons=%x\n",
+				(unsigned)leveltime, (int)bi, (int)bp->position,
+				(int)(FixedHypot(bp->mo->momx, bp->mo->momy) >> FRACBITS), (unsigned)bp->distancetofinish,
+				(unsigned)bp->botvars.respawnconfirm, (int)bp->botvars.turnconfirm, (unsigned)bp->botvars.spindashconfirm,
+				(unsigned)bp->cmd.buttons);
+		}
+	}
+#endif
 	if (run)
 	{
 		leveltime++;
@@ -1211,11 +1736,21 @@ void P_Ticker(boolean run)
 		}
 	}
 
+#ifdef __3DS__
+	if (run && rr3ds_bench)
+		RR3DS_BenchTick();
+	if (run && rr3ds_benchmanual)
+		RR3DS_BenchManualTick();
+#endif
 	if (gamestate == GS_LEVEL)
 	{
 		// Move the camera during levels.
 		K_UpdateDirector();
 		P_RunChaseCameras();
+#ifdef RR_LOWEND_CODE
+		if (run && RR_LOWEND && !levelloading)
+			RR3DS_PrecipFollow(); // rain only near the cameras (p_mobj.c)
+#endif
 	}
 
 	if (run && !levelloading && leveltime)

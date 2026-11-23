@@ -16,11 +16,17 @@
 ///        plus functions to parse command line parameters, configure game
 ///        parameters, and call the startup functions.
 
+#include "dummy/i_3ds_log.h"
 #include <tracy/tracy/Tracy.hpp>
+#include "rr_config.h"  // single-file configuration
 
 #if (defined (__unix__) && !defined (MSDOS)) || defined(__APPLE__) || defined (UNIXCOMMON)
 #include <sys/stat.h>
 #include <sys/types.h>
+#endif
+
+#ifdef __3DS__
+#include <dirent.h>
 #endif
 
 #ifdef __GNUC__
@@ -64,6 +70,7 @@
 #include "m_cheat.h"
 #include "y_inter.h"
 #include "p_local.h" // chasecam
+#include "d_netcmd.h" // 3DS cv_skin (bench)
 #include "m_misc.h" // screenshot functionality
 #include "deh_tables.h" // Dehacked list test
 #include "m_cond.h" // condition initialization
@@ -96,6 +103,9 @@
 
 #ifdef HWRENDER
 #include "hardware/hw_main.h" // 3D View Rendering
+#ifndef __3DS__
+#include "hardware/rr_cfgsync.h" // Ring Racers E: synchronize config with the original
+#endif
 #endif
 
 #include "lua_script.h"
@@ -148,6 +158,12 @@ static initmultiplefilesentry_t startuppwads[MAX_WADFILES];
 
 boolean devparm = false; // started game with -devparm
 
+#ifdef __3DS__
+extern "C" boolean rr3ds_bench;
+extern "C" boolean rr3ds_benchmanual;
+extern "C" void RR3DS_WorstFrame(double total_ms, double draw_ms); // [WORST] (p_tick.c)
+extern "C" void RR3DS_BenchSetItem(const char *name);
+#endif
 boolean g_singletics = false; // timedemo
 boolean lastdraw = false;
 
@@ -352,6 +368,21 @@ void D_ProcessEvents(boolean callresponders)
 // draw current display, possibly wiping it from the previous
 //
 
+#ifdef __3DS__
+enum { I3DS_PROF_FRAME, I3DS_PROF_TICS, I3DS_PROF_DISPLAY, I3DS_PROF_2D, I3DS_PROF_PRESENT, I3DS_PROF_VBLANK, I3DS_PROF_MISC, I3DS_PROF_STATE, I3DS_PROF_WORLD, I3DS_PROF_MENU, I3DS_PROF_START, I3DS_PROF_COUNT };
+extern "C" void I_3DS_ProfBegin(int id);
+extern "C" void I_3DS_ProfEnd(int id);
+extern "C" void I_3DS_ProfFrameDone(void);
+extern "C" unsigned long long svcGetSystemTick(void);
+extern "C" int g_3ds_prof_cap;
+#define PROF_B(x) I_3DS_ProfBegin(x)
+#define PROF_E(x) I_3DS_ProfEnd(x)
+#else
+#define PROF_B(x)
+#define PROF_E(x)
+#endif
+
+
 // wipegamestate can be set to -1 to force a wipe on the next draw
 // added comment : there is a wipe eatch change of the gamestate
 gamestate_t wipegamestate = GS_LEVEL;
@@ -359,8 +390,34 @@ gamestate_t wipegamestate = GS_LEVEL;
 INT16 wipetypepre = -1;
 INT16 wipetypepost = -1;
 
+#ifdef RR_PCGEN
+// [LOOP] "split HUD": milliseconds accumulated per frame in the large D_Display calls after the 3D pass.
+// 0 VID_DisplayRHIPostimg, 1 ST_Drawer (HUD), 2 HU_Drawer, 3 M_Drawer (menu), 4 CON_Drawer
+static double rr_dsp_sum[5] = {0, 0, 0, 0, 0}, rr_dsp_max[5] = {0, 0, 0, 0, 0};
+static int rr_dsp_n = 0;
+static void rr_dsp_add(int k, precise_t t0)
+{
+	const double ms = (double)(I_GetPreciseTime() - t0) * 1000.0 / (double)I_GetPrecisePrecision();
+	rr_dsp_sum[k] += ms;
+	if (ms > rr_dsp_max[k]) rr_dsp_max[k] = ms;
+}
+#define RR_DSP(k, call) do { const precise_t rr_t0_ = I_GetPreciseTime(); call; rr_dsp_add(k, rr_t0_); } while (0)
+#else
+#define RR_DSP(k, call) call
+#endif
+
+static bool D_Display(bool world);
+#ifdef RR_PROFD
+extern "C" __attribute__((no_instrument_function)) void *RR3DS_DisplayFn(void) { return (void *)&D_Display; }
+#endif
+#ifdef __3DS__
+extern "C" void RR3DS_GovernorFrame(void);
+#endif
 static bool D_Display(bool world)
 {
+#ifdef __3DS__
+	RR3DS_GovernorFrame();
+#endif
 	bool ranwipe = false;
 	boolean forcerefresh = false;
 	static boolean wipe = false;
@@ -482,6 +539,7 @@ static bool D_Display(bool world)
 	V_ClearClipRect();
 
 	// do buffered drawing
+	PROF_B(I3DS_PROF_STATE);
 	switch (gamestate)
 	{
 		case GS_TITLESCREEN:
@@ -532,6 +590,7 @@ static bool D_Display(bool world)
 		default:
 			break;
 	}
+	PROF_E(I3DS_PROF_STATE);
 
 	HU_Erase();
 
@@ -632,7 +691,9 @@ static bool D_Display(bool world)
 								topleft = screens[0] + viewwindowy*vid.width + viewwindowx;
 							}
 
+							PROF_B(I3DS_PROF_WORLD);
 							R_RenderPlayerView();
+							PROF_E(I3DS_PROF_WORLD);
 
 							if (i > 0)
 								M_Memcpy(ylookup, ylookup1, viewheight*sizeof (ylookup[0]));
@@ -703,7 +764,7 @@ static bool D_Display(bool world)
 			}
 			if (rendermode != render_none)
 			{
-				VID_DisplayRHIPostimg();
+				RR_DSP(0, VID_DisplayRHIPostimg());
 			}
 
 			if (lastdraw)
@@ -723,14 +784,16 @@ static bool D_Display(bool world)
 				case GS_LEVEL:
 				{
 					AM_Drawer();
-					ST_Drawer();
+					RR_DSP(1, ST_Drawer());
 					srb2::r_debug::draw_frame_list();
 					F_TextPromptDrawer();
 					break;
 				}
 				case GS_TITLESCREEN:
 				{
+					PROF_B(I3DS_PROF_STATE);
 					F_TitleScreenDrawer();
+					PROF_E(I3DS_PROF_STATE);
 					break;
 				}
 				case GS_CEREMONY:
@@ -752,7 +815,7 @@ static bool D_Display(bool world)
 
 	if (Playing() || demo.playback)
 	{
-		HU_Drawer();
+		RR_DSP(2, HU_Drawer());
 	}
 
 	// change gamma if needed
@@ -766,13 +829,15 @@ static bool D_Display(bool world)
 #ifdef HAVE_THREADS
 	I_lock_mutex(&k_menu_mutex);
 #endif
-	M_Drawer(); // menu is drawn even on top of everything
+	PROF_B(I3DS_PROF_MENU);
+	RR_DSP(3, M_Drawer()); // menu is drawn even on top of everything
+	PROF_E(I3DS_PROF_MENU);
 #ifdef HAVE_THREADS
 	I_unlock_mutex(k_menu_mutex);
 #endif
 	// focus lost moved to M_Drawer
 
-	CON_Drawer();
+	RR_DSP(4, CON_Drawer());
 
 	ps_uitime = I_GetPreciseTime() - ps_uitime;
 
@@ -855,11 +920,17 @@ static bool D_Display(bool world)
 	return ranwipe;
 }
 
+
 // =========================================================================
 // D_SRB2Loop
 // =========================================================================
 
 tic_t rendergametic;
+#ifdef __3DS__
+#include "r_patch.h"
+#include "z_zone.h"
+extern "C" { size_t rr3ds_rotbytes = 0; UINT32 rr3ds_dbg_real = 0, rr3ds_dbg_cap = 0; }
+#endif
 
 extern "C" consvar_t cv_skiprender;
 
@@ -896,7 +967,11 @@ void D_SRB2Loop(void)
 	SCR_SetMode(); // change video mode
 	SCR_Recalc();
 
+#ifdef __3DS__
+	chosenrendermode = render_soft; // 3DS uses the software renderer via CtrRhi
+#else
 	chosenrendermode = render_none;
+#endif
 
 	// Check and print which version is executed.
 	// Use this as the border between setup and the main game loop being entered.
@@ -925,8 +1000,13 @@ void D_SRB2Loop(void)
 	{
 		// capbudget is the minimum precise_t duration of a single loop iteration
 		precise_t capbudget;
+		PROF_B(I3DS_PROF_START);
 		precise_t enterprecise = I_GetPreciseTime();
 		precise_t finishprecise = enterprecise;
+#if defined(__3DS__) || defined(RR_PCGEN)
+		precise_t rrTicsEnd = enterprecise, rrDispEnd = enterprecise; // [STALL] / [LOOP]
+		precise_t rrTicsStart = enterprecise; // [METER]
+#endif
 
 		g_dc = {};
 		Z_Frame_Reset();
@@ -936,6 +1016,9 @@ void D_SRB2Loop(void)
 			// Casting the return value of a function is bad practice (apparently)
 			double budget = round((1.0 / R_GetFramerateCap()) * I_GetPrecisePrecision());
 			capbudget = (precise_t) budget;
+#ifdef __3DS__
+			g_3ds_prof_cap = (int)R_GetFramerateCap();
+#endif
 		}
 
 		bool ranwipe = false;
@@ -979,14 +1062,45 @@ void D_SRB2Loop(void)
 
 			// don't skip more than 10 frames at a time
 			// (fadein / fadeout cause massive frame skip!)
+#ifdef __3DS__
+			rr3ds_dbg_real += (UINT32)realtics; if (realtics > 8) rr3ds_dbg_cap++;
+#endif
+#ifdef __3DS__
+			if (realtics > TICRATE/3)
+				realtics = TICRATE/3;
+#else
 			if (realtics > 8)
 				realtics = 1;
+#endif
 
 			// process tics (but maybe not if realtic == 0)
 			{
 				ZoneScopedN("TryRunTics");
+				PROF_E(I3DS_PROF_START);
+				PROF_B(I3DS_PROF_TICS);
+#if defined(__3DS__) || defined(RR_PCGEN)
+				rrTicsStart = I_GetPreciseTime();
+#endif
 				TryRunTics(realtics);
+				PROF_E(I3DS_PROF_TICS);
 			}
+#if defined(__3DS__) || defined(RR_PCGEN)
+			rrTicsEnd = I_GetPreciseTime();
+#endif
+#ifdef __3DS__
+			// 3DS : crash r_patchrotation.c:368 (rotated sprites PU_PATCH_ROTATED
+			// were never freed until a map change). Capped at 1 MB: they are flushed between
+			// frames (safe: nobody is drawing them) and regenerated on demand.
+			{
+				extern size_t rr3ds_rotbytes;
+				if (rr3ds_rotbytes > 1024*1024)
+				{
+					CONS_Printf("[ROT] flushing rotated sprites: %u KB\n", (unsigned)(rr3ds_rotbytes>>10));
+					Patch_FreeTag(PU_PATCH_ROTATED);
+					rr3ds_rotbytes = 0;
+				}
+			}
+#endif
 
 			if (lastdraw || singletics || gametic > rendergametic)
 			{
@@ -1084,14 +1198,27 @@ void D_SRB2Loop(void)
 					world = false;
 			}
 
+			PROF_B(I3DS_PROF_DISPLAY);
 			ranwipe = D_Display(world);
+			PROF_E(I3DS_PROF_DISPLAY);
+#if defined(__3DS__) || defined(RR_PCGEN)
+			rrDispEnd = I_GetPreciseTime();
+#endif
 		}
 
 		if ((moviemode || takescreenshot) && rendermode != render_none)
 			I_CaptureVideoFrame();
 
 		// consoleplayer -> displayplayers (hear sounds from viewpoint)
+		PROF_B(I3DS_PROF_MISC);
+#ifdef __3DS__
+		static unsigned long long rr_mt[4]; static int rr_mn;
+		unsigned long long rr_t0 = svcGetSystemTick();
+#endif
 		S_UpdateSounds(); // move positional sounds
+#ifdef __3DS__
+		unsigned long long rr_t1 = svcGetSystemTick();
+#endif
 		NetVoiceUpdate(); // update voice recording whenever possible
 		if (realtics > 0 || singletics)
 		{
@@ -1099,7 +1226,13 @@ void D_SRB2Loop(void)
 			S_TickSoundTest();
 		}
 
+#ifdef __3DS__
+		unsigned long long rr_t2 = svcGetSystemTick();
+#endif
 		LUA_Step();
+#ifdef __3DS__
+		unsigned long long rr_t3 = svcGetSystemTick();
+#endif
 
 #ifdef HAVE_DISCORDRPC
 		if (! dedicated)
@@ -1110,9 +1243,157 @@ void D_SRB2Loop(void)
 
 		Music_Tick();
 		S_UpdateVoicePositionalProperties();
+		PROF_E(I3DS_PROF_MISC);
+#ifdef __3DS__
+		{
+			unsigned long long rr_t4 = svcGetSystemTick();
+			rr_mt[0] += rr_t1 - rr_t0; rr_mt[1] += rr_t2 - rr_t1; rr_mt[2] += rr_t3 - rr_t2; rr_mt[3] += rr_t4 - rr_t3;
+			if (++rr_mn >= 120)
+			{
+				// 268111 ticks per ms (268 MHz CPU)
+				CONS_Printf("[MISC] us/frame: sound3d=%llu cc+test=%llu lua_gc=%llu music+voice=%llu\n",
+					rr_mt[0] / 268 / rr_mn, rr_mt[1] / 268 / rr_mn, rr_mt[2] / 268 / rr_mn, rr_mt[3] / 268 / rr_mn);
+				rr_mt[0] = rr_mt[1] = rr_mt[2] = rr_mt[3] = 0; rr_mn = 0;
+			}
+		}
+#endif
+#ifdef __3DS__
+		{
+			static bool prof_started = false;
+			if (prof_started) { PROF_E(I3DS_PROF_FRAME); I_3DS_ProfFrameDone(); }
+			prof_started = true;
+			PROF_B(I3DS_PROF_FRAME);
+		}
+#endif
 
 		// Fully completed frame made.
 		finishprecise = I_GetPreciseTime();
+#ifdef __3DS__
+		{
+			// [STALL] frame longer than 250 ms: where the time went (max 60 lines)
+			static int rrN = 0;
+			const double rrMs = 1000.0 / (double)I_GetPrecisePrecision();
+			const double tot = (double)(finishprecise - enterprecise) * rrMs;
+			RR3DS_WorstFrame(tot, (double)(rrDispEnd - rrTicsEnd) * rrMs);
+			if (tot > 1000.0 && rrN < 200) // 250 ms used to fill up in 346 s (race at 5 fps)
+			{
+				rrN++;
+				CONS_Printf("[STALL] total=%.0f ms tics=%.0f draw=%.0f rest=%.0f realtics=%d gametic=%d\n",
+					tot, (double)(rrTicsEnd - enterprecise) * rrMs,
+					(double)(rrDispEnd - rrTicsEnd) * rrMs,
+					(double)(finishprecise - rrDispEnd) * rrMs, (int)realtics, (int)gametic);
+			}
+		}
+#endif
+
+#ifdef __3DS__
+		{
+			// [METER] real frame accountant (always on; meter=0 in rr_config.txt turns it off). Few clock reads
+			// per frame, no per-function hooks: it does NOT inflate times like diag=1. Every ~3 s in a race:
+			// where the wall time of a frame goes: pre | tics | draw (3D, present, HUD) | rest | wait (sleep/after).
+			static int s_on = -1;
+			if (s_on < 0) s_on = RRCfg_Int("meter", 1);
+			// Also in menus/title (23 nov: what eats performance in the main menu / character select).
+			if (s_on && (gamestate == GS_LEVEL || gamestate == GS_MENU || gamestate == GS_TITLESCREEN))
+			{
+				static precise_t w0 = 0, prevEnter = 0;
+				static double a[8]; static double worst = 0;
+				static UINT32 nf = 0, nd = 0, ntic = 0, g0 = 0;
+				static UINT64 pt0 = 0, gt0 = 0;
+				extern UINT64 rr3ds_m_ptick, rr3ds_m_gtick;
+				const double ms = 1000.0 / (double)I_GetPrecisePrecision();
+				const precise_t te = (rrTicsEnd < enterprecise) ? enterprecise : rrTicsEnd;
+				const precise_t ts = (rrTicsStart < enterprecise || rrTicsStart > te) ? enterprecise : rrTicsStart;
+				const precise_t de = (rrDispEnd < te) ? te : rrDispEnd;
+				const double wall = prevEnter ? (double)(enterprecise - prevEnter) * ms : 0.0;
+				const double drawn = (double)(de - te) * ms;
+				a[0] += (double)(ts - enterprecise) * ms;               // pre: before tics (input, timing)
+				a[1] += (double)(te - ts) * ms;                         // tics: TryRunTics (all tics of the frame)
+				a[2] += drawn;                                          // draw total (D_Display)
+				if (drawn > 0.0)
+				{
+					a[3] += (double)ps_rendercalltime * ms;              // 3D world (HWR + GPU commands)
+					a[4] += (double)ps_swaptime * ms;                    // present (I_FinishUpdate)
+					nd++;
+				}
+				a[5] += (double)(finishprecise - de) * ms;              // rest: sounds, lua, music
+				a[6] += wall > 0.0 ? wall - (double)(finishprecise - enterprecise) * ms : 0.0; // wait: after the frame (sleep, vsync)
+				a[7] += wall;
+				if (wall > worst) worst = wall;
+				ntic += (UINT32)(gametic - g0); g0 = (UINT32)gametic;
+				nf++;
+				prevEnter = enterprecise;
+				if (!w0) { w0 = finishprecise; pt0 = rr3ds_m_ptick; gt0 = rr3ds_m_gtick; }
+				if ((double)(finishprecise - w0) * ms >= 3000.0 && nf > 0)
+				{
+					const double n = (double)nf, nt = ntic ? (double)ntic : 1.0;
+					const double gt = (double)(rr3ds_m_gtick - gt0) * ms, pt = (double)(rr3ds_m_ptick - pt0) * ms;
+					CONS_Printf("[METER] %s %.1f fps | frame %.0f ms (worst %.0f) with %.1f tics/frame = pre %.1f + TICS %.1f + DRAW %.1f + rest %.1f + wait %.1f\n",
+						gamestate == GS_LEVEL ? "race" : (gamestate == GS_MENU ? "menu" : "title"),
+						1000.0 / (a[7] / n), a[7] / n, worst, nt / n, a[0] / n, a[1] / n, a[2] / n, a[5] / n, a[6] / n);
+					CONS_Printf("[METER]   per tic: total %.1f ms = P_Ticker %.1f + G_Ticker excl. P_Ticker %.1f + outside G_Ticker %.1f | per-frame draw: 3D %.1f + present %.1f + HUD and rest %.1f\n",
+						a[1] / nt, pt / nt, (gt - pt) / nt, (a[1] - gt) / nt,
+						nd ? a[3] / nd : 0.0, nd ? a[4] / nd : 0.0, nd ? (a[2] - a[3] - a[4]) / nd : 0.0);
+					for (int k = 0; k < 8; k++) a[k] = 0;
+					worst = 0; nf = nd = ntic = 0; w0 = finishprecise; pt0 = rr3ds_m_ptick; gt0 = rr3ds_m_gtick;
+				}
+			}
+		}
+#endif
+
+#ifdef RR_PCGEN
+		{
+			// [LOOP]: roughly once per second, log where the frame time goes (average and worst, in ms).
+			// tics = game logic; draw = D_Display (3D + HUD + I_FinishUpdate); rest = sound, music, network...
+			// If nothing was drawn this iteration, rrDispEnd = rrTicsEnd or enterprecise.
+			static precise_t s_lp_win = 0;
+			static double s_lp_s[3] = {0, 0, 0}, s_lp_m[3] = {0, 0, 0};
+			static int s_lp_n = 0;
+			// draw split into 3D (ps_rendercalltime) / present (ps_swaptime, I_FinishUpdate) / HUD and the rest
+			static double s_lp_3d = 0, s_lp_sw = 0, s_lp_hud = 0, s_lp_hudm = 0;
+			static int s_lp_nd = 0;
+			const double ms = 1000.0 / (double)I_GetPrecisePrecision();
+			const precise_t te = (rrTicsEnd < enterprecise) ? enterprecise : rrTicsEnd;
+			const precise_t de = (rrDispEnd < te) ? te : rrDispEnd;
+			const double v[3] = {(double)(te - enterprecise) * ms, (double)(de - te) * ms, (double)(finishprecise - de) * ms};
+			for (int k = 0; k < 3; k++)
+			{
+				s_lp_s[k] += v[k];
+				if (v[k] > s_lp_m[k]) s_lp_m[k] = v[k];
+			}
+			s_lp_n++;
+			if (v[1] > 0.0)
+			{
+				const double r3d = (double)ps_rendercalltime * ms, rsw = (double)ps_swaptime * ms;
+				const double hud = v[1] - r3d - rsw;
+				s_lp_3d += r3d; s_lp_sw += rsw; s_lp_hud += hud;
+				rr_dsp_n++;
+				if (hud > s_lp_hudm) s_lp_hudm = hud;
+				s_lp_nd++;
+			}
+			if (!s_lp_win) s_lp_win = finishprecise;
+			if ((double)(finishprecise - s_lp_win) * ms >= 1000.0)
+			{
+				I_OutputMsg("[LOOP] %s: %d iterations | tics avg %.1f worst %.1f | draw avg %.1f worst %.1f | rest avg %.1f worst %.1f ms\n",
+					gamestate == GS_LEVEL ? "race" : "menu", s_lp_n,
+					s_lp_s[0] / s_lp_n, s_lp_m[0], s_lp_s[1] / s_lp_n, s_lp_m[1], s_lp_s[2] / s_lp_n, s_lp_m[2]);
+				if (s_lp_nd)
+					I_OutputMsg("[LOOP] draw split: 3D avg %.1f | HUD and rest avg %.1f worst %.1f | present (I_FinishUpdate) avg %.1f ms\n",
+						s_lp_3d / s_lp_nd, s_lp_hud / s_lp_nd, s_lp_hudm, s_lp_sw / s_lp_nd);
+				if (rr_dsp_n)
+					I_OutputMsg("[LOOP] HUD split (avg/worst ms): postimg %.1f/%.1f | ST_Drawer %.1f/%.1f | HU_Drawer %.1f/%.1f | menu %.1f/%.1f | console %.1f/%.1f\n",
+						rr_dsp_sum[0] / rr_dsp_n, rr_dsp_max[0], rr_dsp_sum[1] / rr_dsp_n, rr_dsp_max[1], rr_dsp_sum[2] / rr_dsp_n, rr_dsp_max[2],
+						rr_dsp_sum[3] / rr_dsp_n, rr_dsp_max[3], rr_dsp_sum[4] / rr_dsp_n, rr_dsp_max[4]);
+				for (int k = 0; k < 5; k++) rr_dsp_sum[k] = rr_dsp_max[k] = 0;
+				rr_dsp_n = 0;
+				s_lp_3d = s_lp_sw = s_lp_hud = s_lp_hudm = 0;
+				s_lp_nd = 0;
+				s_lp_win = finishprecise;
+				s_lp_n = 0;
+				for (int k = 0; k < 3; k++) s_lp_s[k] = s_lp_m[k] = 0;
+			}
+		}
+#endif
 
 		// Use the time before sleep for frameskip calculations:
 		// post-sleep time is literally being intentionally wasted
@@ -1145,7 +1426,14 @@ void D_SRB2Loop(void)
 		}
 		else
 		{
+#ifdef __3DS__
+			// 3DS: no automatic frameskip. When a frame exceeded 16.6 ms
+			// the next cycle did NOT draw and also slept a full ~16 ms:
+			// 1 of every 2 cycles was drawn (~18 real fps with a 3D background).
+			if (false)
+#else
 			if (!ranwipe && frameskip < 3 && deltatics > 1.0)
+#endif
 			{
 				frameskip++;
 			}
@@ -1202,7 +1490,9 @@ void D_SRB2Loop(void)
 
 			if (elapsed > 0 && (INT64)capbudget > elapsed && !vsync_with_match_refresh)
 			{
+				PROF_B(I3DS_PROF_VBLANK);
 				I_SleepDuration(capbudget - (finishprecise - enterprecise));
+				PROF_E(I3DS_PROF_VBLANK);
 			}
 		}
 		// Capture the time once more to get the real delta time.
@@ -1225,7 +1515,9 @@ void D_ClearState(void)
 
 	// okay, stop now
 	// (otherwise the game still thinks we're playing!)
+#ifdef HAVE_CURL // 3DS without curl
 	CURLAbortFile();
+#endif
 	SV_StopServer();
 	SV_ResetServer();
 	serverlistultimatecount = 0;
@@ -1411,7 +1703,7 @@ static void IdentifyVersion(void)
 {
 	const char *srb2waddir = NULL;
 
-#if (defined (__unix__) && !defined (MSDOS)) || defined (UNIXCOMMON) || defined (HAVE_SDL)
+#if (defined (__unix__) && !defined (MSDOS)) || defined (UNIXCOMMON) || defined (HAVE_SDL) || defined (__3DS__)
 	// change to the directory where 'bios.pk3' is found
 	srb2waddir = I_LocateWad();
 #endif
@@ -1447,11 +1739,62 @@ static void IdentifyVersion(void)
 
 	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","scripts.pk3"), ASSET_HASH_SCRIPTS_PK3);
 	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","gfx.pk3"), ASSET_HASH_GFX_PK3);
+#ifdef __3DS__
+	// Port-specific graphics (touch-screen glyph, etc.)
+	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","3ds.pk3"), NULL);
+	// Converted texture pack (assets3ds/convert_textures.py): only the
+	// index is read at startup; pixels are read on demand.
+	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","ringracers_3ds.pk3"), NULL);
+	// Definitions from the textures_*.pk3 files (assets3ds/extract_defs.py):
+	// TERRAIN (tripwires, speed pads, ...), ANIMDEFS, BRIGHT, etc.
+	// Must be loaded before R_Init (terrainID of each texture).
+	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","ringracers_3ds_defs.pk3"), NULL);
+#endif
+#ifndef __3DS__ // Texture pk3s cause OOM in R_LoadTextures on 3DS with 64MB (~27K textures, ~870KB of index tables alone); skip until memory budget allows
 	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","textures_general.pk3"), ASSET_HASH_TEXTURES_GENERAL_PK3);
 	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","textures_segazones.pk3"), ASSET_HASH_TEXTURES_SEGAZONES_PK3);
 	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","textures_originalzones.pk3"), ASSET_HASH_TEXTURES_ORIGINALZONES_PK3);
+#endif
+#ifndef __3DS__ // chars.pk3 and followers.pk3 cause OOM in R_InitSkins on 3DS (each skin_t ~265KB); skip until memory budget allows
 	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","chars.pk3"), ASSET_HASH_CHARS_PK3);
 	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","followers.pk3"), ASSET_HASH_FOLLOWERS_PK3);
+#else
+	// Only 1 character (Sonic) trimmed from chars.pk3 to avoid running out of RAM
+	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","chars_3ds.pk3"), NULL);
+	{
+		// the 63 lazily loaded vanilla characters (tools/convert_chars.py): small index
+		// at startup; each character's sprites (data/chars/<name>.pk3) are loaded when it is used (r_skins.c).
+		const char *idx = va(spandf, srb2waddir, "data", "chars_idx.pk3");
+		snprintf(rr3ds_charsdir, sizeof rr3ds_charsdir, "%s" PATHSEP "data" PATHSEP "chars", srb2waddir);
+		if (FIL_FileExists(idx))
+			D_AddFile(startupiwads, num_startupiwads++, idx, NULL);
+		else
+			I_3DS_Both("[SKINS] no chars_idx.pk3: Sonic + mods only\n");
+	}
+	{
+		// Character mods: every *.pk3 in <folder>/mods/ (the .pk3 files are opened on demand, LRU in w_wad.cpp)
+		const char *mdir = va("%s" PATHSEP "mods", srb2waddir);
+		DIR *md = opendir(mdir);
+		int nmods = 0;
+		if (!md)
+			I_3DS_Both("[MODS] no folder %s\n", mdir);
+		else
+		{
+			struct dirent *de;
+			while ((de = readdir(md)) != NULL && nmods < 16)
+			{
+				size_t l = strlen(de->d_name);
+				if (l < 5 || stricmp(de->d_name + l - 4, ".pk3") != 0)
+					continue;
+				I_3DS_Both("[MODS] added %s\n", de->d_name);
+				D_AddFile(startupiwads, num_startupiwads++, va("%s" PATHSEP "%s", mdir, de->d_name), NULL);
+				nmods++;
+			}
+			closedir(md);
+			I_3DS_Both("[MODS] %d files\n", nmods);
+		}
+	}
+#endif
 	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","maps.pk3"), ASSET_HASH_MAPS_PK3);
 	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","unlocks.pk3"), ASSET_HASH_UNLOCKS_PK3);
 	D_AddFile(startupiwads, num_startupiwads++, va(spandf,srb2waddir,"data","staffghosts.pk3"), ASSET_HASH_STAFFGHOSTS_PK3);
@@ -1459,6 +1802,7 @@ static void IdentifyVersion(void)
 	D_AddFile(startupiwads, num_startupiwads++, va(pandf,srb2waddir,"patch.pk3"), ASSET_HASH_PATCH_PK3);
 #endif
 
+#ifndef __3DS__
 #define MUSICTEST(str) \
 		musicpath = va(spandf,srb2waddir,"data",str);\
 		handle = W_OpenWadFile(&musicpath, NULL, false); \
@@ -1485,6 +1829,7 @@ static void IdentifyVersion(void)
 	}
 
 #undef MUSICTEST
+#endif // __3DS__
 }
 
 static void
@@ -1669,6 +2014,9 @@ void D_SRB2Main(void)
 		}
 
 		configfile[sizeof configfile - 1] = '\0';
+#ifndef __3DS__
+		RR_CfgSync(configfile, sizeof configfile); // Ring Racers E: own config, synchronized with the original
+#endif
 	}
 
 	// If config isn't writable, tons of behavior will be broken.
@@ -1792,37 +2140,78 @@ void D_SRB2Main(void)
 
 	M_PasswordInit();
 
+	// shaders.pk3 does not exist on 3DS (no hwr2 pipeline) - skip it to avoid I_Error
+#ifndef __3DS__
 	W_InitShaderLookup(va(spandf, srb2path, "data", "shaders.pk3"));
+#endif
 
 	//---------------------------------------------------- READY SCREEN
 	// we need to check for dedicated before initialization of some subsystems
 
+	// 3DS: use I_OutputMsg (flushes to disk immediately) + printf (flushes to the screen
+	// top screen via consoleInit). CONS_Printf is buffered and can be lost before a hang.
 	CONS_Printf("I_StartupGraphics()...\n");
+#ifdef __3DS__
+	I_OutputMsg("[3DS] pre I_StartupGraphics\n"); printf("[3DS] pre I_StartupGraphics\n");
+#endif
 	I_StartupGraphics();
+#ifdef __3DS__
+	I_OutputMsg("[3DS] post I_StartupGraphics\n"); printf("[3DS] post I_StartupGraphics\n");
+#endif
 	I_StartDisplayUpdate();
+#ifdef __3DS__
+	I_OutputMsg("[3DS] post I_StartDisplayUpdate\n"); printf("[3DS] post I_StartDisplayUpdate\n");
+#endif
 
 	I_StartupInput();
+#ifdef __3DS__
+	I_OutputMsg("[3DS] post I_StartupInput\n"); printf("[3DS] post I_StartupInput\n");
+#endif
 
 #ifdef HWRENDER
 	// Lactozilla: Add every hardware mode CVAR and CCMD.
 	// Has to be done before the configuration file loads,
 	// but after the OpenGL library loads.
 	HWR_AddCommands();
+#ifdef __3DS__
+	// 3DS: there is no OglSdlSurface to call HWR_Startup; do it here (IWADs already
+	// loaded, before R_InitTextureData and before loading the title map).
+	if (rendermode == render_opengl)
+		HWR_Startup();
+#endif
 #endif
 
 	//--------------------------------------------------------- CONSOLE
 	// setup loading screen
+#ifdef __3DS__
+	I_OutputMsg("[3DS] pre SCR_Startup\n"); printf("[3DS] pre SCR_Startup\n");
+#endif
 	SCR_Startup();
+#ifdef __3DS__
+	I_OutputMsg("[3DS] post SCR_Startup\n"); printf("[3DS] post SCR_Startup\n");
+#endif
 
 	// Do this in background; lots of number crunching
+#ifdef __3DS__
+	I_OutputMsg("[3DS] pre R_InitTranslucencyTables\n"); printf("[3DS] pre R_InitTranslucencyTables\n");
+#endif
 	R_InitTranslucencyTables();
+#ifdef __3DS__
+	I_OutputMsg("[3DS] post R_InitTranslucencyTables\n"); printf("[3DS] post R_InitTranslucencyTables\n");
+#endif
 
 	CON_SetLoadingProgress(LOADED_ISTARTUPGRAPHICS);
 
 	CONS_Printf("HU_Init()...\n");
 	HU_Init();
+#ifdef __3DS__
+	I_3DS_Both("[3DS] post HU_Init\n");
+#endif
 
 	CON_Init();
+#ifdef __3DS__
+	I_3DS_Both("[3DS] post CON_Init\n");
+#endif
 
 	D_RegisterServerCommands();
 	D_RegisterClientCommands(); // be sure that this is called before D_CheckNetGame
@@ -1830,6 +2219,9 @@ void D_SRB2Main(void)
 	S_RegisterSoundStuff();
 
 	I_RegisterSysCommands();
+#ifdef __3DS__
+	I_3DS_Both("[3DS] post RegisterCmds\n");
+#endif
 
 	CON_SetLoadingProgress(LOADED_HUINIT);
 
@@ -1837,6 +2229,10 @@ void D_SRB2Main(void)
 
 	// HACK: Refer to https://git.do.srb2.org/KartKrew/RingRacers/-/merge_requests/29#note_61574
 	partadd_earliestfile = numwadfiles;
+
+#ifdef __3DS__
+	I_3DS_Both("[3DS] pre W_InitMultipleFiles pwads\n");
+#endif
 	W_InitMultipleFiles(startuppwads, num_startuppwads, true);
 
 	// Only search for pwad maps and reload graphics if we actually have a pwad added
@@ -1846,7 +2242,13 @@ void D_SRB2Main(void)
 		// search for pwad maps
 		//
 		P_InitMapData();
+#ifdef __3DS__
+		CONS_Printf("[STARTUP] %s: %u ms\n", "after InitMapData", (unsigned)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision()));
+#endif
 		HU_LoadGraphics();
+#ifdef __3DS__
+	CONS_Printf("[STARTUP] %s: %u ms\n", "after HU_LoadGraphics", (unsigned)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision()));
+#endif
 	}
 
 	D_CleanFile(startuppwads, num_startuppwads);
@@ -1854,16 +2256,34 @@ void D_SRB2Main(void)
 	partadd_earliestfile = UINT16_MAX;
 
 	CON_SetLoadingProgress(LOADED_PWAD);
+#ifdef __3DS__
+	CONS_Printf("[STARTUP] %s: %u ms\n", "before M_Init", (unsigned)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision()));
+#endif
 
 	M_Init();
+#ifdef __3DS__
+	CONS_Printf("[STARTUP] %s: %u ms\n", "before config", (unsigned)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision()));
+#endif
 
 	//--------------------------------------------------------- CONFIG.CFG
 	M_FirstLoadConfig(); // WARNING : this do a "COM_BufExecute()"
+#ifdef RR_PCGEN
+	RR_DisplayModeStartup(); // display mode chosen in the menu
+#endif
+#ifdef __3DS__
+	CONS_Printf("[STARTUP] %s: %u ms\n", "before profiles", (unsigned)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision()));
+#endif
 
 	// Load Profiles now that default controls have been defined
 	PR_LoadProfiles();	// load control profiles
+#ifdef __3DS__
+	CONS_Printf("[STARTUP] %s: %u ms\n", "before stats", (unsigned)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision()));
+#endif
 
 	SV_LoadStats();
+#ifdef __3DS__
+	CONS_Printf("[STARTUP] %s: %u ms\n", "after stats", (unsigned)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision()));
+#endif
 
 #if (defined (__unix__) && !defined (MSDOS)) || defined (UNIXCOMMON) || defined (HAVE_SDL)
 	VID_PrepareModeList(); // Regenerate Modelist according to cv_fullscreen
@@ -1882,6 +2302,9 @@ void D_SRB2Main(void)
 		strlcpy(gamedatafilename, M_GetNextParm(), sizeof gamedatafilename);
 	}
 	G_LoadGameData();
+#ifdef __3DS__
+	CONS_Printf("[STARTUP] %s: %u ms\n", "after gamedata", (unsigned)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision()));
+#endif
 
 	wipegamestate = gamestate;
 
@@ -1913,7 +2336,7 @@ void D_SRB2Main(void)
 		g_voice_disabled = true;
 	}
 
-	if (M_CheckParm("-noaudio")) // combines -nosound and -nomusic
+	if (M_CheckParm("-noaudio") || M_CheckParm("-testmode")) // combines -nosound and -nomusic (-testmode = no audio)
 	{
 		sound_disabled = true;
 		digital_disabled = true;
@@ -2029,8 +2452,15 @@ void D_SRB2Main(void)
 	if (D_CheckNetGame())
 		autostart = true;
 	CON_SetLoadingProgress(LOADED_DCHECKNETGAME);
+#ifdef __3DS__
+#define RR_BOOT(tag) CONS_Printf("[BOOT] %s: %u ms\n", tag, (unsigned)(I_GetPreciseTime() * 1000 / I_GetPrecisePrecision()))
+	RR_BOOT("before SV_LoadBans");
+#endif
 
 	SV_LoadBans(); // Must be after D_CheckNetGame, or winsock getaddrinfo isn't ready and readback throws a fit
+#ifdef __3DS__
+	RR_BOOT("after SV_LoadBans");
+#endif
 
 	if (splitscreen && !M_CheckParm("-connect")) // Make sure multiplayer & autostart is set if you have splitscreen, even after D_CheckNetGame
 		multiplayer = autostart = true;
@@ -2047,8 +2477,21 @@ void D_SRB2Main(void)
 	if (dedicated)
 		COM_ImmedExecute(va("exec \"%s" PATHSEP "ringserv.cfg\"\n", srb2home));
 	else
+#ifdef __3DS__
+	{
+		// 3DS: if ringexec.cfg does not exist, "exec" falls back to findfile() = recursive search of
+		// the whole SD folder: measured 65 s at startup (Azahar). Only exec it if it is really there.
+		const char *rrExecPath = va("%s" PATHSEP "ringexec.cfg", srb2home);
+		if (FIL_FileExists(rrExecPath))
+			COM_ImmedExecute(va("exec \"%s\" -noerror\n", rrExecPath));
+	}
+#else
 		COM_ImmedExecute(va("exec \"%s" PATHSEP "ringexec.cfg\" -noerror\n", srb2home));
+#endif
 
+#ifdef __3DS__
+	RR_BOOT("after exec ringexec");
+#endif
 	if (!autostart)
 		M_PushSpecialParameters(); // push all "+" parameters at the command buffer
 
@@ -2094,6 +2537,66 @@ void D_SRB2Main(void)
 		ultimatemode = true;
 	}*/
 
+#ifdef __3DS__
+	// 3DS: bench mode. sdmc:/3ds/rr_bench = "MODE [map] [object]"
+	//   FULLOFF            -> regular game (menus)
+	// OFF [map] [obj]  -> straight to the map, you drive, 1 lap, measures fps and exits.
+	// obj = fixed item at the start (SNEAKER by default)
+	// ON  [map]        -> automatic bench (camera follows waypoints)
+	// (compat: map name only = ON)
+	{
+		static char rr_benchmap[64] = "RR_RobotnikCoaster";
+		// rr_config.txt -> mode = normal | race | bench, map = RR_..., item = SNEAKER
+		// (if there is no "mode", the old rr_bench is read as before)
+		char lineStr[200] = {0}, cm[32] = {0}, cp[64] = {0}, co[64] = {0};
+		int found = 0;
+		if (RRCfg_Str("mode", cm, sizeof cm))
+		{
+			RRCfg_Str("map", cp, sizeof cp); RRCfg_Str("item", co, sizeof co);
+			const char *mm = !strcasecmp(cm, "bench") ? "ON" : !strcasecmp(cm, "race") ? "OFF" : "FULLOFF";
+			snprintf(lineStr, sizeof lineStr, "%s %s %s", mm, cp, co);
+			found = 1;
+		}
+		else found = RRCfg_Str("bench", lineStr, sizeof lineStr);
+		if (found)
+		{
+			char t1[64] = {0}, t2[64] = {0}, t3[64] = {0};
+			int n = sscanf(lineStr, "%63s %63s %63s", t1, t2, t3);
+			int mode = 2; // 0 fulloff, 1 off (manual), 2 on
+			const char *map = NULL, *item = NULL;
+			if (n >= 1 && (!strcasecmp(t1, "FULLOFF") || !strcasecmp(t1, "FULL_OFF")))
+				mode = 0;
+			else if (n >= 1 && !strcasecmp(t1, "OFF"))
+			{ mode = 1; if (n >= 2) map = t2; if (n >= 3) item = t3; }
+			else if (n >= 1 && !strcasecmp(t1, "ON"))
+			{ mode = 2; if (n >= 2) map = t2; }
+			else if (n >= 1 && t1[0])
+			{ mode = 2; map = t1; }
+			if (map && map[0])
+				strlcpy(rr_benchmap, map, sizeof(rr_benchmap));
+			if (mode != 0)
+			{
+				rr3ds_bench = (mode == 2);
+				rr3ds_benchmanual = (mode == 1);
+				if (mode == 1)
+					RR3DS_BenchSetItem(item ? item : "SNEAKER");
+				bootmap = rr_benchmap;
+				CONS_Printf("[BENCH] mode %s: map %s\n", mode == 2 ? "ON" : "OFF(manual)", rr_benchmap);
+				{
+					// bots_bench=N (level 1-13): race with bots to measure with 8 racers (the bench used to run with 1)
+					const int nb = RRCfg_Int("bots_bench", 0);
+					if (nb > 0)
+					{
+						char b[32];
+						snprintf(b, sizeof b, "bots %d\n", nb > 13 ? 13 : nb);
+						COM_BufAddText(b);
+						CONS_Printf("[BENCH] bots level %d\n", nb > 13 ? 13 : nb);
+					}
+				}
+			}
+		}
+	}
+#endif
 	// rei/miru: bootmap (Idea: starts the game on a predefined map)
 	if (bootmap && !(M_CheckParm("-warp") && M_IsNextParm()))
 	{
@@ -2112,6 +2615,11 @@ void D_SRB2Main(void)
 	if (!dedicated)
 	{
 		PR_ApplyProfile(cv_ttlprofilen.value, 0);
+#ifdef __3DS__
+		// in bench (ON/OFF) the character is fixed = Sonic (the only one available)
+		if (rr3ds_bench || rr3ds_benchmanual)
+			CV_StealthSet(&cv_skin[0], "sonic");
+#endif
 
 		if (gamedata->importprofilewins == true)
 		{
@@ -2297,6 +2805,32 @@ void D_SRB2Main(void)
 				G_SetUsedCheats();
 			}
 
+#ifdef __3DS__
+			// The bench used to start EVERYTHING as Race. A special stage (Sealed Star)
+			// must start with its own gametype (Special): without the race intro and
+			// chasing the UFO. Same as Time Attack: it is guessed from the map's TOL.
+			if ((rr3ds_bench || rr3ds_benchmanual) && newgametype == -1 && mapheaderinfo[pstartmap-1])
+			{
+				const INT32 gtb = G_GuessGametypeByTOL(mapheaderinfo[pstartmap-1]->typeoflevel);
+				if (gtb != -1 && gtb != gametype)
+				{
+					j = gametype;
+					G_SetGametype(gtb);
+					D_GameTypeChanged(j);
+				}
+				// automatic bench ONLY on regular races. Special stage and
+				// prison -> manual (you drive; ends when the phase/prison is over).
+				if (rr3ds_bench && gametype != GT_RACE)
+				{
+					rr3ds_bench = false;
+					rr3ds_benchmanual = true;
+					RR3DS_BenchSetItem("SNEAKER");
+					CONS_Printf("[BENCH] not a regular race: MANUAL mode (you drive)\n");
+				}
+				CONS_Printf("[BENCH] gametype: %s\n", gametypes[gametype]->name);
+			}
+#endif
+
 			D_MapChange(pstartmap, gametype, (cv_kartencore.value == 1), true, 0, false, false);
 		}
 	}
@@ -2307,8 +2841,14 @@ void D_SRB2Main(void)
 	}
 	else
 	{
+#ifdef __3DS__
+		RR_BOOT("before F_StartIntro");
+#endif
 		F_StartIntro(); // Tails 03-03-2002
 		CV_StealthSetValue(&cv_currprofile, -1);
+#ifdef __3DS__
+		RR_BOOT("after F_StartIntro");
+#endif
 	}
 
 	CON_ToggleOff();

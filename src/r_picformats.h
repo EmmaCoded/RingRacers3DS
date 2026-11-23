@@ -92,7 +92,12 @@ boolean Picture_IsFlatFormat(pictureformat_t format);
 boolean Picture_CheckIfDoomPatch(softwarepatch_t *patch, size_t size);
 
 // Structs
+#ifdef __3DS__
+// spriteinfo[NUMSPRITES] took 2.7 MB of .bss; 1-byte enum and INT16 pivots -> ~1 MB less
+typedef enum __attribute__((packed))
+#else
 typedef enum
+#endif
 {
 	ROTAXIS_X, // Roll (the default)
 	ROTAXIS_Y, // Pitch
@@ -101,7 +106,11 @@ typedef enum
 
 struct spriteframepivot_t
 {
+#ifdef __3DS__
+	INT16 x, y;
+#else
 	INT32 x, y;
+#endif
 	rotaxis_t rotaxis;
 };
 
@@ -128,7 +137,9 @@ void *Picture_PNGConvert(
 boolean Picture_PNGDimensions(UINT8 *png, INT32 *width, INT32 *height, INT16 *topoffset, INT16 *leftoffset, size_t size);
 #endif
 
+#ifndef __3DS__ // the table takes a fixed 129 KB; on 3DS there are almost no PNGs (NearestColor)
 #define PICTURE_PNG_USELOOKUP
+#endif
 
 // SpriteInfo
 extern spriteinfo_t spriteinfo[NUMSPRITES];

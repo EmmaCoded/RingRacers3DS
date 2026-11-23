@@ -223,9 +223,23 @@ void SetChannelsNum(void)
 	if (cv_numChannels.value == 999999999) //Alam_GBC: OH MY ROD!(ROD rimmiced with GOD!)
 		CV_StealthSet(&cv_numChannels,cv_numChannels.defaultvalue);
 
+#ifdef __3DS__
+	// the 3DS has 22 sound-effect channels (i_sound.c RR_NSFXCH) and the
+	// logical channel was mapped with %22: with 64 channels, 22 overwrote 0, etc. and one
+	// sound cut off another (e.g. ring when using with L without sound on console).
+	// With 22 logical channels the mapping is 1 to 1 and priority decides which one plays.
+	{
+		INT32 n = cv_numChannels.value;
+		if (n > 22) n = 22;
+		if (n)
+			channels = (channel_t *)Z_Calloc(n * sizeof (channel_t), PU_STATIC, NULL);
+		numofchannels = (channels ? n : 0);
+	}
+#else
 	if (cv_numChannels.value)
 		channels = (channel_t *)Z_Calloc(cv_numChannels.value * sizeof (channel_t), PU_STATIC, NULL);
 	numofchannels = (channels ? cv_numChannels.value : 0);
+#endif
 
 	S_ResetCaptions();
 }
@@ -586,6 +600,9 @@ void S_StartSoundAtVolume(const void *origin_p, sfxenum_t sfx_id, INT32 volume)
 		if (!sfx->data)
 		{
 			sfx->data = I_GetSfx(sfx);
+#ifdef __3DS__
+			{ extern void RR3DS_PreNoteSfx(const char *nombre); RR3DS_PreNoteSfx(sfx->name); }
+#endif
 
 			if (!sfx->data)
 			{
@@ -2786,7 +2803,7 @@ static void Command_MusicDef_f(void)
 void GameSounds_OnChange(void);
 void GameSounds_OnChange(void)
 {
-	if (M_CheckParm("-nosound") || M_CheckParm("-noaudio"))
+	if (M_CheckParm("-nosound") || M_CheckParm("-noaudio") || M_CheckParm("-testmode"))
 		return;
 
 	if (cv_gamesounds.value != sound_disabled)
@@ -2809,7 +2826,7 @@ void GameSounds_OnChange(void)
 void GameDigiMusic_OnChange(void);
 void GameDigiMusic_OnChange(void)
 {
-	if (M_CheckParm("-nomusic") || M_CheckParm("-noaudio"))
+	if (M_CheckParm("-nomusic") || M_CheckParm("-noaudio") || M_CheckParm("-testmode"))
 		return;
 	else if (M_CheckParm("-nodigmusic"))
 		return;
@@ -2835,7 +2852,7 @@ void VoiceSelfDeafen_OnChange(void);
 void weaponPrefChange(INT32 ssplayer);
 void VoiceSelfDeafen_OnChange(void)
 {
-	if (M_CheckParm("-novoice") || M_CheckParm("-noaudio"))
+	if (M_CheckParm("-novoice") || M_CheckParm("-noaudio") || M_CheckParm("-testmode"))
 		return;
 
 	g_voice_disabled = cv_voice_selfdeafen.value;

@@ -76,7 +76,9 @@
 #include "../r_main.h"
 #include "../r_state.h"
 #include "../tables.h"
+#ifndef __3DS__
 #include "r_opengl/r_opengl.h"
+#endif
 #include "../r_main.h"	// for R_FOV
 
 #ifdef HAVE_SPHEREFRUSTRUM

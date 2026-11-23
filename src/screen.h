@@ -44,8 +44,15 @@ extern "C" {
 // we try to re-allocate a minimum of buffers for stability of the memory,
 // so all the small-enough tables based on screen size, are allocated once
 // and for all at the maximum size.
+#ifdef __3DS__
+// the 3DS ALWAYS draws at 400x240 (I3DS_VIDWIDTH/HEIGHT). The software
+// renderer tables were built for 1920x1200 (~500 KB of unused .bss).
+#define MAXVIDWIDTH 400
+#define MAXVIDHEIGHT 240
+#else
 #define MAXVIDWIDTH 1920 // don't set this too high because actually
 #define MAXVIDHEIGHT 1200 // lots of tables are allocated with the MAX size.
+#endif
 #define BASEVIDWIDTH 320 // NEVER CHANGE THIS! This is the original
 #define BASEVIDHEIGHT 200 // resolution of the graphics.
 
@@ -129,6 +136,23 @@ extern UINT8 setrenderneeded;
 extern double averageFPS;
 
 void SCR_ChangeRenderer(void);
+#ifndef __3DS__
+extern consvar_t cv_gfxapi; // PC: graphics API (rr_gfxapi.h)
+extern consvar_t cv_rrrenderer; // PC: single menu option (Software/Legacy GL/DX9/DX9Ex)
+extern consvar_t cv_rrapirestart; // "safe switch" (always restart when changing API)
+extern consvar_t cv_rrlowend; // PC: low-end mode (3DS logic, no online)
+extern consvar_t cv_rrborderless; // PC: "Borderless Window" (screen-sized window without borders)
+extern consvar_t cv_rrdisplaymode; // "Display Mode" (preference: Window/Fullscreen/Borderless)
+void RR_ToggleDisplayMode(void);  // F11
+void RR_DisplayModeStartup(void); // after loading the config
+#ifdef RR_PCGEN
+extern consvar_t cv_rrnetlowend, cv_rrnetlowwait; // online match low-end (E server netvars)
+#endif
+#ifdef __cplusplus
+extern "C"
+#endif
+void RRGfx_SyncMenu(void);
+#endif
 
 extern CV_PossibleValue_t cv_renderer_t[];
 

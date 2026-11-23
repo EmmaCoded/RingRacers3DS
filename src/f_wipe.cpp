@@ -35,7 +35,8 @@
 #include "g_game.h"
 #include "st_stuff.h"
 
-#if NUMSCREENS < 5
+#if NUMSCREENS < 5 || defined(__3DS__)
+// 3DS: RR's wipes are GPU post-processing (hwr2); without hwr2 they are skipped.
 #define NOWIPE // do not enable wipe image post processing for ARM, SH and MIPS CPUs
 #endif
 
@@ -43,6 +44,19 @@
 #include "k_menu.h"
 
 using namespace srb2;
+
+#ifdef __3DS__
+// GPU fade (dummy/gpu_present_3ds.c)
+extern "C" {
+int I_3DS_WipeEnabled(void);
+void I_3DS_WipeCapture(int k, int pending);
+int I_3DS_WipeReady(void);
+void I_3DS_WipeSet(int on, float t);
+void I_3DS_WipeFrame(int mode, int reverse, const unsigned char *mask, int mw, int mh);
+void I_3DS_WipeFree(void);
+int I_3DS_TwodeePending(void);
+}
+#endif
 
 typedef struct fademask_s {
 	UINT8* mask;
@@ -351,6 +365,9 @@ static void refresh_wipe_screen_texture(rhi::Rhi& rhi, rhi::Handle<rhi::Texture>
   */
 void F_WipeStartScreen(void)
 {
+#ifdef __3DS__
+	I_3DS_WipeCapture(0, I_3DS_TwodeePending());
+#endif
 #ifndef NOWIPE
 	rhi::Rhi* rhi = srb2::sys::get_rhi(srb2::sys::g_current_rhi);
 
@@ -379,6 +396,9 @@ void F_WipeStartScreen(void)
   */
 void F_WipeEndScreen(void)
 {
+#ifdef __3DS__
+	I_3DS_WipeCapture(1, 1);
+#endif
 #ifndef NOWIPE
 	rhi::Rhi* rhi = srb2::sys::get_rhi(srb2::sys::g_current_rhi);
 
@@ -426,12 +446,92 @@ void F_WipeStageTitle(void)
 void F_RunWipe(UINT8 wipemode, UINT8 wipetype, boolean drawMenu, const char *colormap, boolean reverse, boolean encorewiggle)
 {
 #ifdef NOWIPE
+	(void)colormap;
+	(void)encorewiggle;
+#ifdef __3DS__
+	// fade like the PC shader (FADEttff masks); duration = number of FADEmmss lumps (1 per tic)
+	if (!staffsync && wipetype <= 99 && I_3DS_WipeReady())
+	{
+		char lumpname[10];
+		int len = 0;
+		while (len < 100)
+		{
+			snprintf(lumpname, sizeof lumpname, "FADE%.2hu%.2hu", (UINT16)wipetype, (UINT16)len);
+			if (W_CheckNumForName(lumpname) == LUMPERROR)
+				break;
+			len++;
+		}
+		CONS_Printf("[FADE] type %d: %d frames\n", (int)wipetype, len);
+		if (len > 0)
+		{
+			WipeInAction = true;
+			I_UpdateTime(); // I_GetTime keeps the old value (after loading it jumped to the end)
+			const tic_t t0 = I_GetTime();
+			lastwipetic = t0;
+			for (int f = 0; f < len; )
+			{
+				tic_t nowtime;
+				while (!((nowtime = I_GetTime()) - lastwipetic))
+				{
+					I_Sleep(cv_sleep.value);
+					I_UpdateTime();
+				}
+				lastwipetic = nowtime;
+				// the frame is derived from TIME (1 mask per tic, like PC): if the 3DS
+				// is slower, masks are skipped instead of stretching the fade
+				f = (int)(nowtime - t0) - 1;
+				if (f >= len)
+					f = len - 1;
+
+				// mask for the frame (same as hwr2 PostprocessWipePass)
+				{
+					int mode = 0; // 0 blend, 1 invert, 2 to black (MD), 3 to white (MD)
+					if (F_WipeIsToBlack(wipemode)) mode = 2;
+					else if (F_WipeIsToWhite(wipemode)) mode = 3;
+					else if (F_WipeIsToInvert(wipemode)) mode = 1;
+					snprintf(lumpname, sizeof lumpname, "FADE%.2hu%.2hu", (UINT16)wipetype, (UINT16)f);
+					const lumpnum_t ml = W_CheckNumForName(lumpname);
+					const unsigned char *mask = NULL;
+					int mw = 0, mh = 0;
+					if (ml != LUMPERROR)
+					{
+						switch (W_LumpLength(ml))
+						{
+						case 256000: mw = 640; mh = 400; break;
+						case 64000: mw = 320; mh = 200; break;
+						case 16000: mw = 160; mh = 100; break;
+						case 4000: mw = 80; mh = 50; break;
+						default: break;
+						}
+						if (mw)
+							mask = (const unsigned char *)W_CacheLumpNum(ml, PU_CACHE);
+					}
+					I_3DS_WipeFrame(mode, reverse ? 1 : 0, mask, mw, mh);
+				}
+				I_OsPolling();
+				D_ProcessEvents(false);
+				I_UpdateNoBlit();
+				if (drawMenu)
+					M_Drawer(); // the menu goes on top of the fade
+				I_FinishUpdate();
+				NetKeepAlive();
+				if (f >= len - 1)
+					break;
+			}
+			WipeInAction = false;
+			CONS_Printf("[FADE] finished (%d tics)\n", (int)(I_GetTime() - t0));
+		}
+	}
+	else
+		CONS_Printf("[FADE] skipped: type %d staffsync %d\n", (int)wipetype, (int)staffsync);
+	I_3DS_WipeSet(0, 0.f);
+	I_3DS_WipeFree();
+#else
 	(void)wipemode;
+	(void)reverse;
 	(void)wipetype;
 	(void)drawMenu;
-	(void)colormap;
-	(void)reverse;
-	(void)encorewiggle;
+#endif
 #else
 	tic_t nowtime;
 	UINT8 wipeframe = 0;
@@ -442,6 +542,12 @@ void F_RunWipe(UINT8 wipemode, UINT8 wipetype, boolean drawMenu, const char *col
 
 	if (staffsync)
 		return;
+
+#ifdef RR_PCGEN
+	// [WIPE]: log fades (to see whether they run and how many steps each API draws)
+	const precise_t rr_wipe_t0 = I_GetPreciseTime();
+	int rr_wipe_drawn = 0;
+#endif
 
 	if (colormap != NULL)
 		clump = W_GetNumForName(colormap);
@@ -513,6 +619,9 @@ void F_RunWipe(UINT8 wipemode, UINT8 wipetype, boolean drawMenu, const char *col
 
 			hw_state->wipe->set_target_size(static_cast<uint32_t>(vid.width), static_cast<uint32_t>(vid.height));
 			hw_state->wipe->draw(*rhi);
+#ifdef RR_PCGEN
+			rr_wipe_drawn++;
+#endif
 		}
 
 		I_OsPolling();
@@ -545,6 +654,11 @@ void F_RunWipe(UINT8 wipemode, UINT8 wipetype, boolean drawMenu, const char *col
 
 	WipeInAction = false;
 
+#ifdef RR_PCGEN
+	I_OutputMsg("[WIPE] mode=%d type=%d steps=%d drawn=%d %.0f ms\n", (int)wipemode, (int)wipetype,
+		(int)wipeframe, rr_wipe_drawn, (double)(I_GetPreciseTime() - rr_wipe_t0) * 1000.0 / (double)I_GetPrecisePrecision());
+#endif
+
 	if (fcolor)
 	{
 		Z_Free(fcolor);
@@ -558,7 +672,7 @@ void F_RunWipe(UINT8 wipemode, UINT8 wipetype, boolean drawMenu, const char *col
   */
 tic_t F_GetWipeLength(UINT8 wipetype)
 {
-#ifdef NOWIPE
+#if defined(NOWIPE) && !defined(__3DS__) // 3DS has a fade
 	(void)wipetype;
 	return 0;
 #else
@@ -585,7 +699,7 @@ tic_t F_GetWipeLength(UINT8 wipetype)
   */
 boolean F_WipeExists(UINT8 wipetype)
 {
-#ifdef NOWIPE
+#if defined(NOWIPE) && !defined(__3DS__) // 3DS has a fade
 	(void)wipetype;
 	return false;
 #else

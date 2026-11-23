@@ -279,6 +279,8 @@ typedef enum
 #define CHALLENGEGRIDHEIGHT 5
 #ifdef DEVELOP
 #define CHALLENGEGRIDLOOPWIDTH 3
+#elif defined(__3DS__)
+#define CHALLENGEGRIDLOOPWIDTH 25 // 400px top screen / 16
 #else
 #define CHALLENGEGRIDLOOPWIDTH (BASEVIDWIDTH/16)
 #endif

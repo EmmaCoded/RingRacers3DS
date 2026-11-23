@@ -278,6 +278,12 @@ boolean K_PathfindToWaypoint(
 	const boolean     useshortcuts,
 	const boolean     huntbackwards);
 
+#if defined(__3DS__) || defined(RR_PCGEN) // PC: low-end mode
+// cached version (3DS only): total distance to `fin` without shortcuts or going backwards.
+boolean K_PathDistToFinishCached(waypoint_t *src, waypoint_t *fin, UINT32 *totaldist);
+void K_PathCacheInvalidate(void);
+#endif
+
 
 /*--------------------------------------------------
 	boolean K_PathfindThruCircuit(

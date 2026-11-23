@@ -19,6 +19,7 @@
 
 #include "../d_player.h"
 #include "../doomdef.h"
+#include "../rr_config.h"
 #include "../doomstat.h"
 #include "../k_bot.h" // FIXME
 #include "../k_kart.h"
@@ -225,7 +226,12 @@ private:
 			frostspeed *= 2;
 		}
 
+#ifdef RR_LOWEND_CODE
+		// on 3DS half the ice dust (each particle checks collisions, ~800 us)
+		if (leveltime % (RR_LOWEND ? 6 : 3) == 0)
+#else
 		if (leveltime % 3 == 0)
+#endif
 		{
 			Frost* frost = Frost::spawn(this, {});
 
@@ -299,7 +305,11 @@ struct SidewaysFreezeThruster : Mobj
 
 	void think()
 	{
+#ifdef RR_LOWEND_CODE
+		if (leveltime % (RR_LOWEND ? 4 : 2) == 0)
+#else
 		if (leveltime % 2 == 0)
+#endif
 		{
 			spew();
 			spew();

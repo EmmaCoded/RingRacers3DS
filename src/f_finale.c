@@ -900,7 +900,9 @@ void F_IntroTicker(void)
 	{
 		ResetSkipSequences();
 		M_StartControlPanel();
+#ifndef RR_PCGEN // Ring Racers E: never public
 		CV_StealthSetValue(&cv_advertise, 1);
+#endif
 		currentMenu = &PLAY_MP_OptSelectDef;
 		return;
 	}
@@ -1868,6 +1870,9 @@ void F_VersionDrawer(void)
 	V_DrawThinString(vid.dupx, texty, trans|f, str);\
 	texty -= 10*vid.dupy;\
 }
+#ifndef __3DS__
+	addtext(trans, "Ring Racers E v2.4E"); // PC edition (without the "v2.5" line below)
+#endif
 	if (customversionstring[0] != '\0')
 	{
 		addtext(0, customversionstring);
@@ -1893,13 +1898,14 @@ void F_VersionDrawer(void)
 		}
 
 #else // Regular build
-		addtext(trans, va("%s", VERSIONSTRING));
+#ifdef __3DS__
+		addtext(trans, "v2.4"); // 3DS: the data is the official 2.4's (internal SRB2VERSION stays at 2.5)
+#else
+		; // Ring Racers E: the version already shows above ("v2.4E"); internal SRB2VERSION stays at 2.5
+#endif
 #endif
 
-		if (compuncommitted)
-		{
-			addtext(V_REDMAP|V_STRINGDANCE, "! UNCOMMITTED CHANGES !");
-		}
+		// No "UNCOMMITTED CHANGES" warning (3DS and PC)
 	}
 #undef addtext
 }
@@ -2394,6 +2400,9 @@ void F_StartWaitingPlayers(void)
 
 	waitcolormap = R_GetTranslationColormap(randskin, skins[randskin]->prefcolor, 0);
 
+#ifdef __3DS__
+	R_3DS_EnsureSkin(randskin);
+#endif
 	sprdef = &skins[randskin]->sprites[P_GetSkinSprite2(skins[randskin], SPR2_FSTN, NULL)];
 
 	for (i = 0; i < 2; i++)

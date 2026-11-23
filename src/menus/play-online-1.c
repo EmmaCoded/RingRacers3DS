@@ -15,6 +15,7 @@
 #include "../s_sound.h"
 #include "../mserv.h" // cv_masterserver
 #include "../m_misc.h"
+#include "../rr_nete.h" // Ring Racers E: Y = My IP Addresses
 
 #if defined (TESTERS)
 	#define IT_STRING_CALL_NOTESTERS IT_DISABLED
@@ -73,6 +74,13 @@ static void M_PreMPRoomSelectInitChoice(INT32 ch)
 static void M_PreMPRoomSelectInit(INT32 choice)
 {
 	(void)choice;
+
+#ifdef RR_PCGEN
+	// Ring Racers E: no server list (it would be the original Ring Racers', incompatible)
+	M_StartMessage("Ring Racers E", M_GetText("Ring Racers E only plays with other\nRing Racers E players, by\n\"Direct Join\" (IP address).\n\nThe host can see their addresses\nwith the Y button (\"My IP Addresses\")\nin the Online menu.\n"), NULL, MM_NOTHING, NULL, NULL);
+	S_StartSound(NULL, sfx_s3k36);
+	return;
+#endif
 
 	if (!CV_IsSetToDefault(&cv_masterserver) && cv_masterserver_nagattempts.value > 0)
 	{
@@ -163,7 +171,11 @@ menuitem_t PLAY_MP_OptSelect[] =
 static void draw_routine(void)
 {
 	M_DrawKartGamemodeMenu();
+#ifdef RR_PCGEN
+	RRNet_DrawMyIPsHint(44, BASEVIDHEIGHT - 10, true); // x=44 so it does not end up under the Egga Channel drawing; instead of "List via <master server>" (E does not use the list)
+#else
 	M_DrawMasterServerReminder();
+#endif
 }
 
 static boolean any_stored_ips(void)
@@ -192,6 +204,10 @@ static void init_routine(void)
 static boolean input_routine(INT32 key)
 {
 	uses_gamepad = (key == -1);
+#ifdef RR_PCGEN
+	if (RRNet_MyIPsInput(0)) // Y = My IP Addresses
+		return true;
+#endif
 	return false;
 }
 
@@ -243,6 +259,8 @@ void M_MPOptSelectInit(INT32 choice)
 		return;
 	}
 #endif
+
+// previously blocked online play with low-end; now the E server synchronizes low-end (rr_nete.c).
 
 	mpmenu.modechoice = 0;
 	mpmenu.ticker = 0;

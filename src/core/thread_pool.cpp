@@ -56,7 +56,9 @@ static void pool_executor(
 {
 	{
 		srb2::String thread_name = srb2::format("Thread Pool Thread {}", thread_index);
+#ifdef TRACY_ENABLE
 		tracy::SetThreadName(thread_name.c_str());
+#endif
 	}
 
 	int spins = 0;
@@ -295,10 +297,19 @@ void ThreadPool::shutdown()
 	}
 }
 
+#ifdef __3DS__
+// 3DS: the pool is created during static initialization (immediate mode) because
+// I_ThreadPoolInit is not called at port startup, which left it as nullptr.
+std::unique_ptr<ThreadPool> srb2::g_main_threadpool = std::make_unique<ThreadPool>();
+#else
 std::unique_ptr<ThreadPool> srb2::g_main_threadpool;
+#endif
 
 void I_ThreadPoolInit(void)
 {
+#ifdef __3DS__
+	if (g_main_threadpool) return;
+#endif
 	SRB2_ASSERT(g_main_threadpool == nullptr);
 	size_t thread_count = std::min(static_cast<unsigned int>(9), std::thread::hardware_concurrency());
 	if (thread_count > 1)
@@ -308,7 +319,14 @@ void I_ThreadPoolInit(void)
 		thread_count -= 1;
 	}
 
-	if (M_CheckParm("-singlethreaded"))
+#ifdef __3DS__
+	// 3DS: hardware_concurrency() returns 0 and there are no useful threads for the pool;
+	// with 0 queues schedule() wrote out of range and corrupted the heap.
+	// Immediate mode: tasks run on the main thread.
+	if (true)
+#else
+	if (thread_count == 0 || M_CheckParm("-singlethreaded"))
+#endif
 	{
 		g_main_threadpool = std::make_unique<ThreadPool>();
 	}

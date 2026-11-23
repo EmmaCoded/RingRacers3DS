@@ -2489,6 +2489,7 @@ static UINT8 V_GetGenericButtonCodeWidth(UINT8 c, boolean largebutton)
 		break;
 
 	case gb_back:
+	case gb_touch:
 		x -= largebutton ? 2 : 6;
 		break;
 
@@ -2516,6 +2517,9 @@ void V_DrawStringScaled(
 		int        fontno,
 		const char *s)
 {
+#ifdef __3DS__
+	if ((uintptr_t)s < 0x100000) return; // invalid text (crash in Video Options)
+#endif
 	INT32     hchw;/* half-width for centering */
 
 	INT32     dupx;
@@ -2885,6 +2889,7 @@ void V_DrawStringScaled(
 								case gb_rt: return {{2, 2, Draw::GenericButton::rt}};
 								case gb_start: return {{2, 2, Draw::GenericButton::start}};
 								case gb_back: return {{2, 2, Draw::GenericButton::back}};
+								case gb_touch: return {{2, 2, Draw::GenericButton::touch}};
 								case gb_ls: return {{1, 2, Draw::GenericButton::ls}};
 								case gb_rs: return {{1, 2, Draw::GenericButton::rs}};
 								case gb_dpad: return {{2, 2, Draw::GenericButton::dpad}};
@@ -2908,6 +2913,7 @@ void V_DrawStringScaled(
 									case gb_rt: return {{1, 4, Draw::GenericButton::rt}};
 									case gb_start: return {{1, 6, Draw::GenericButton::start}};
 									case gb_back: return {{1, 6, Draw::GenericButton::back}};
+									case gb_touch: return {{1, 6, Draw::GenericButton::touch}};
 									case gb_ls: return {{1, 5, Draw::GenericButton::ls}};
 									case gb_rs: return {{1, 5, Draw::GenericButton::rs}};
 									case gb_dpad: return {{1, 4, Draw::GenericButton::dpad}};
@@ -2995,6 +3001,9 @@ fixed_t V_StringScaledWidth(
 		int        fontno,
 		const char *s)
 {
+#ifdef __3DS__
+	if ((uintptr_t)s < 0x100000) return 0; // invalid text (crash in Video Options)
+#endif
 	INT32     hchw;/* half-width for centering */
 
 	INT32     dupx;
@@ -3689,6 +3698,11 @@ void V_Recalc(void)
 void VID_DisplaySoftwareScreen()
 {
 	ZoneScoped;
+#ifdef __3DS__
+	// 3DS: screens[0] is presented in I_FinishUpdate (dummy/i_video_3ds.c).
+	// Post-effects (water, flip, heat) require shaders: disabled.
+	return;
+#endif
 
 	rhi::Rhi* rhi = srb2::sys::get_rhi(srb2::sys::g_current_rhi);
 	hwr2::HardwareState* hw_state = srb2::sys::main_hardware_state();
@@ -3699,6 +3713,11 @@ void VID_DisplaySoftwareScreen()
 
 void VID_DisplayRHIPostimg(void)
 {
+#ifdef __3DS__
+	// 3DS: screens[0] is presented in I_FinishUpdate (dummy/i_video_3ds.c).
+	// Post-effects (water, flip, heat) require shaders: disabled.
+	return;
+#endif
 	rhi::Rhi* rhi = srb2::sys::get_rhi(srb2::sys::g_current_rhi);
 	hwr2::HardwareState* hw_state = srb2::sys::main_hardware_state();
 

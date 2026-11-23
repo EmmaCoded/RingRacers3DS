@@ -60,6 +60,7 @@
 
 // So that the screenshot menu auto-updates...
 #include "k_menu.h"
+#include "am_map.h" // automapactive, AM_MinimapGenerate, minigen_t
 
 #ifdef HWRENDER
 #include "hardware/hw_main.h"
@@ -500,6 +501,9 @@ void M_LoadJoinedIPs(void)
 	char *s;
 	char buffer[2*(MAX_LOGIP+1)];
 
+#ifdef __3DS__
+	return; // no online on 3DS: skip the saved-IP list (avoids a failed fopen at boot)
+#endif
 	filepath = va("%s" PATHSEP "%s", srb2home, IPLOGFILE);
 	f = fopen(filepath, "r");
 
@@ -666,6 +670,13 @@ void M_FirstLoadConfig(void)
 	COM_BufInsertText(va("%s \"%s\"\n", cv_execversion.name, cv_execversion.defaultvalue));
 	CV_InitFilterVar();
 
+#ifdef __3DS__
+	// without ringconfig.cfg, "exec" took ~15 s on 3DS (it searches for the file). If it does not exist,
+	// it is not executed and at the end one is WRITTEN with the default values.
+	boolean rr3ds_cfgExists = false;
+	{ FILE *cf = fopen(configfile, "rb"); if (cf) { rr3ds_cfgExists = true; fclose(cf); } }
+	if (rr3ds_cfgExists)
+#endif
 	// load config, make sure those commands doesnt require the screen...
 	COM_BufInsertText(va("exec \"%s\" -immediate\n", configfile));
 	// no COM_BufExecute() needed; that does it right away
@@ -677,6 +688,13 @@ void M_FirstLoadConfig(void)
 	// make sure I_Quit() will write back the correct config
 	// (do not write back the config if it crash before)
 	gameconfig_loaded = true;
+#ifdef __3DS__
+	if (!rr3ds_cfgExists)
+	{
+		M_SaveConfig(NULL);
+		CONS_Printf("[CFG] %s did not exist: created with default values\n", configfile);
+	}
+#endif
 
 	// reset to default player stuff
 #if 0
@@ -779,6 +797,9 @@ void M_SaveConfig(const char *filename)
 
 		try
 		{
+#ifdef __3DS__
+			{ std::error_code ec; fs::remove(real, ec); } // on 3DS rename does not overwrite (config was not saved)
+#endif
 			fs::rename(tmp, real);
 		}
 		catch (const fs::filesystem_error& ex)
@@ -1107,11 +1128,10 @@ static inline boolean M_PNGLib(void)
 	aPNG_set_acTL = (P_png_set_acTL) hwSym("png_set_acTL", pnglib);
 	aPNG_write_frame_head = (P_png_write_frame_head) hwSym("png_write_frame_head", pnglib);
 	aPNG_write_frame_tail = (P_png_write_frame_tail) hwSym("png_write_frame_tail", pnglib);
-#endif
-#ifdef _WIN32
-	aPNG_set_acTL = (P_png_set_acTL) GetProcAddress("png_set_acTL", pnglib);
-	aPNG_write_frame_head = (P_png_write_frame_head) GetProcAddress("png_write_frame_head", pnglib);
-	aPNG_write_frame_tail = (P_png_write_frame_tail) GetProcAddress("png_write_frame_tail", pnglib);
+#elif defined(_WIN32) // correct order (module, name); with SDL hwSym already does it
+	aPNG_set_acTL = (P_png_set_acTL) GetProcAddress((HMODULE)pnglib, "png_set_acTL");
+	aPNG_write_frame_head = (P_png_write_frame_head) GetProcAddress((HMODULE)pnglib, "png_write_frame_head");
+	aPNG_write_frame_tail = (P_png_write_frame_tail) GetProcAddress((HMODULE)pnglib, "png_write_frame_tail");
 #endif
 	return (aPNG_set_acTL && aPNG_write_frame_head && aPNG_write_frame_tail);
 #endif

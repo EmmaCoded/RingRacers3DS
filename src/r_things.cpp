@@ -148,11 +148,15 @@ static void R_InstallSpriteLump(UINT16 wad,            // graphics patch
 		maxframe = frame;
 
 #ifdef ROTSPRITE
+#ifdef __3DS__
+	sprtemp[frame].rotated = NULL; (void)r; // created when rotating
+#else
 	for (r = 0; r < 16; r++)
 	{
 		sprtemp[frame].rotated[0][r] = NULL;
 		sprtemp[frame].rotated[1][r] = NULL;
 	}
+#endif
 #endif
 
 	if (rotation == 0)
@@ -250,6 +254,101 @@ static void R_InstallSpriteLump(UINT16 wad,            // graphics patch
 		sprtemp[frame].flip &= ~(1<<rotation);
 }
 
+#ifdef __3DS__
+#include <sys/stat.h>
+#include <stdio.h>
+#include <stdlib.h>
+// ---- 3DS sprite size cache (per pk3: sdmc:/3ds/RingRacers3ds/cache/spr/<name>.spd) ----
+// One entry per lump: width, height, offsets + the lump's size (if the size differs, the entry is ignored).
+// The header carries the pk3's size and lump count; if they differ, the whole file is ignored.
+namespace {
+struct RrSprDim { INT32 w, h; INT16 top, left; UINT32 size; };
+struct RrSprDimHdr { UINT32 magic, filesize, n; };
+constexpr UINT32 kSprDimMagic = 0x32445053; // "SPD2"
+RrSprDim *s_sdTab = NULL;
+UINT16 s_sdWad = 0xFFFF, s_sdN = 0;
+bool s_sdDirty = false;
+char s_sdPath[200];
+
+void RR3DS_SprDimEnd(void)
+{
+	if (!s_sdTab)
+		return;
+	if (s_sdDirty)
+	{
+		FILE *f = fopen(s_sdPath, "wb");
+		if (f)
+		{
+			const RrSprDimHdr h = { kSprDimMagic, (UINT32)wadfiles[s_sdWad]->filesize, (UINT32)s_sdN };
+			fwrite(&h, sizeof h, 1, f);
+			fwrite(s_sdTab, sizeof(RrSprDim), s_sdN, f);
+			fclose(f);
+			CONS_Printf("[SPRDIM] saved %s (%u lumps)\n", s_sdPath, (unsigned)s_sdN);
+		}
+	}
+	free(s_sdTab);
+	s_sdTab = NULL;
+	s_sdDirty = false;
+	s_sdWad = 0xFFFF;
+}
+
+void RR3DS_SprDimBegin(UINT16 wadnum)
+{
+	RR3DS_SprDimEnd();
+	const UINT16 n = wadfiles[wadnum]->numlumps;
+	if (n == 0)
+		return;
+	const char *fn = wadfiles[wadnum]->filename;
+	const char *b = fn;
+	for (const char *c = fn; *c; c++)
+		if (*c == '/' || *c == '\\')
+			b = c + 1;
+	mkdir("sdmc:/3ds/RingRacers3ds/cache", 0777);
+	mkdir("sdmc:/3ds/RingRacers3ds/cache/spr", 0777);
+	snprintf(s_sdPath, sizeof s_sdPath, "sdmc:/3ds/RingRacers3ds/cache/spr/%s.spd", b);
+	s_sdTab = (RrSprDim *)calloc(n, sizeof(RrSprDim));
+	if (!s_sdTab)
+		return;
+	s_sdWad = wadnum;
+	s_sdN = n;
+	s_sdDirty = false;
+	FILE *f = fopen(s_sdPath, "rb");
+	if (f)
+	{
+		RrSprDimHdr h;
+		if (fread(&h, sizeof h, 1, f) == 1 && h.magic == kSprDimMagic
+			&& h.filesize == (UINT32)wadfiles[wadnum]->filesize && h.n == (UINT32)n)
+		{
+			if (fread(s_sdTab, sizeof(RrSprDim), n, f) != n)
+				memset(s_sdTab, 0, n * sizeof(RrSprDim));
+		}
+		fclose(f);
+	}
+}
+
+bool RR3DS_SprDimGet(UINT16 wadnum, UINT16 l, INT32 *w, INT32 *h, INT16 *top, INT16 *left)
+{
+	if (!s_sdTab || wadnum != s_sdWad || l >= s_sdN)
+		return false;
+	const RrSprDim &e = s_sdTab[l];
+	if (e.size == 0 || e.size != (UINT32)wadfiles[wadnum]->lumpinfo[l].size)
+		return false;
+	*w = e.w; *h = e.h; *top = e.top; *left = e.left;
+	return true;
+}
+
+void RR3DS_SprDimPut(UINT16 wadnum, UINT16 l, INT32 w, INT32 h, INT16 top, INT16 left)
+{
+	if (!s_sdTab || wadnum != s_sdWad || l >= s_sdN)
+		return;
+	RrSprDim &e = s_sdTab[l];
+	e.w = w; e.h = h; e.top = top; e.left = left;
+	e.size = (UINT32)wadfiles[wadnum]->lumpinfo[l].size;
+	s_sdDirty = true;
+}
+} // namespace
+#endif
+
 // Install a single sprite, given its identifying name (4 chars)
 //
 // (originally part of R_AddSpriteDefs)
@@ -321,6 +420,12 @@ boolean R_AddSingleSpriteDef(const char *sprname, spritedef_t *spritedef, UINT16
 			// store sprite info in lookup tables
 			//FIXME : numspritelumps do not duplicate sprite replacements
 
+#ifdef __3DS__
+			// 3DS: sprite sizes come from a small cache file on the SD. Without it, each of the ~7000
+			// sprite lumps is read (compressed, 1 SD seek each) just to get 4 numbers: ~24 s at startup.
+			if (!RR3DS_SprDimGet(wadnum, l, &width, &height, &topoffset, &leftoffset))
+#endif
+			{
 			W_ReadLumpHeaderPwad(wadnum, l, &patch, PNG_HEADER_SIZE, 0);
 
 #ifndef NO_PNG_LUMPS
@@ -343,6 +448,10 @@ boolean R_AddSingleSpriteDef(const char *sprname, spritedef_t *spritedef, UINT16
 				height = (INT32)(SHORT(patch.height));
 				topoffset = (INT16)(SHORT(patch.topoffset));
 				leftoffset = (INT16)(SHORT(patch.leftoffset));
+			}
+#ifdef __3DS__
+			RR3DS_SprDimPut(wadnum, l, width, height, topoffset, leftoffset);
+#endif
 			}
 
 			spritecachedinfo[numspritelumps].width = width<<FRACBITS;
@@ -508,6 +617,9 @@ void R_AddSpriteDefs(UINT16 wadnum)
 	}
 
 
+#ifdef __3DS__
+	RR3DS_SprDimBegin(wadnum);
+#endif
 	//
 	// scan through lumps, for each sprite, find all the sprite frames
 	//
@@ -528,6 +640,9 @@ void R_AddSpriteDefs(UINT16 wadnum)
 		}
 	}
 
+#ifdef __3DS__
+	RR3DS_SprDimEnd();
+#endif
 	nameonly(strcpy(wadname, wadfiles[wadnum]->filename));
 	CONS_Printf(M_GetText("%s added %d frames in %s sprites\n"), wadname, end-start, sizeu1(addsprites));
 }
@@ -1852,7 +1967,7 @@ static void R_ProjectSprite(mobj_t *thing)
 	{
 		sprdef = &((skin_t *)thing->skin)->sprites[thing->sprite2];
 #ifdef ROTSPRITE
-		sprinfo = &((skin_t *)thing->skin)->sprinfo[thing->sprite2];
+		sprinfo = R_SkinSprInfo((skin_t *)thing->skin, thing->sprite2);
 #endif
 		if (frame >= sprdef->numframes) {
 			CONS_Alert(CONS_ERROR, M_GetText("R_ProjectSprite: invalid skins[\"%s\"].sprites[%sSPR2_%s] frame %s\n"), ((skin_t *)thing->skin)->name, ((thing->sprite2 & FF_SPR2SUPER) ? "FF_SPR2SUPER|": ""), spr2names[(thing->sprite2 & ~FF_SPR2SUPER)], sizeu5(frame));
@@ -3887,14 +4002,18 @@ boolean R_ThingVisible (mobj_t *thing)
 
 boolean R_ThingWithinDist (mobj_t *thing, fixed_t limit_dist)
 {
-	const fixed_t dist = R_PointToDist(thing->x, thing->y);
-
 	if (limit_dist)
 	{
 		// MF_DRAWFROMFARAWAY: visible from any distance
-		if (!(thing->flags & MF_DRAWFROMFARAWAY) && dist > limit_dist)
+		if (!(thing->flags & MF_DRAWFROMFARAWAY))
 		{
-			return false;
+			// squared comparison: no R_PointToDist (angle table + division) per thing per frame
+			// (it was called ~670 times per frame: ~10 ms on the Old 3DS profile)
+			const INT64 dx = (INT64)thing->x - (INT64)viewx;
+			const INT64 dy = (INT64)thing->y - (INT64)viewy;
+			const INT64 lim = (INT64)limit_dist;
+			if ((UINT64)(dx * dx) + (UINT64)(dy * dy) > (UINT64)(lim * lim))
+				return false;
 		}
 	}
 

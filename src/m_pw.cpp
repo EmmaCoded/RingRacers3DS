@@ -720,7 +720,7 @@ void f_devmode()
 
 void f_proceed()
 {
-#if 0
+#ifdef __3DS__ // 3DS: 2.4 behavior (disabled in master 2.5)
 	gamedata->gonerlevel = GDGONER_DONE;
 	gamedata->finishedtutorialchallenge = true;
 	M_UpdateUnlockablesAndExtraEmblems(true, true);

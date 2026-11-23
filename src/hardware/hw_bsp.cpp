@@ -592,6 +592,11 @@ static void loading_status(void)
 	}
 
 	I_OsPolling();
+#ifdef __3DS__
+	// on 3DS I_UpdateNoVsync does not flush the 2D list -> every call accumulated
+	// texts in g_2d until bad_alloc (crash loading 765Stadium in 64 MB). No % screen.
+	return;
+#endif
 	CON_Drawer();
 	sprintf(s, "%d%%", (++ls_percent)<<1);
 	x = BASEVIDWIDTH/2;
@@ -602,10 +607,7 @@ static void loading_status(void)
 	V_DrawString(x-50, y, V_YELLOWMAP, "Loading...");
 	V_DrawRightAlignedString(x+50, y, V_YELLOWMAP, s);
 
-	// Is this really necessary at this point..?
-	V_DrawCenteredString(BASEVIDWIDTH/2, 40, V_YELLOWMAP, "LEGACY GL IS INCOMPLETE AND MANY");
-	V_DrawCenteredString(BASEVIDWIDTH/2, 50, V_YELLOWMAP, "VISUAL FEATURES ARE MISSING/BROKEN.");
-	V_DrawCenteredString(BASEVIDWIDTH/2, 70, V_YELLOWMAP, "USE AT ROBOTNIK'S RISK.");
+	// Ring Racers E: no yellow "LEGACY GL IS INCOMPLETE..." warning (annoying; Legacy GL is being fixed here).
 
 	I_UpdateNoVsync();
 }

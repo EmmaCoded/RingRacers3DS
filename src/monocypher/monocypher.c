@@ -1015,10 +1015,10 @@ static void fe_ccopy(fe f, const fe g, int b)
 // bit (we won't), visible failures will show at the slightest test, and
 // the signed shifts can be replaced by the following:
 //
-//     typedef struct { i64 x:39; } s25;
-//     typedef struct { i64 x:38; } s26;
-//     i64 shift25(i64 x) { s25 s; s.x = ((u64)x)>>25; return s.x; }
-//     i64 shift26(i64 x) { s26 s; s.x = ((u64)x)>>26; return s.x; }
+//     typedef struct { i64 x:39; } ;
+//     typedef struct { i64 x:38; } ;
+//     i64 shift25(i64 x) {  s; s.x = ((u64)x)>>25; return s.x; }
+//     i64 shift26(i64 x) {  s; s.x = ((u64)x)>>26; return s.x; }
 //
 // Current compilers cannot optimise this, causing a 30% drop in
 // performance.  Fairly expensive for something that never happens.

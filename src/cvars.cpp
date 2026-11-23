@@ -31,6 +31,15 @@
 
 #include "command.h"
 #include "doomdef.h"
+#ifndef __3DS__
+#include "hardware/rr_gfxapi.h"
+#include "console.h" // CONS_Alert
+#include "k_menu.h" // M_StartMessage
+#include "m_misc.h" // M_SaveConfig
+#include "i_system.h" // I_Quit
+#include "i_video.h" // rendermode
+#include "doomstat.h" // menuactive
+#endif
 #include "doomtype.h"
 #include "m_fixed.h" // FRACUNIT
 #include "r_skins.h" // DEFAULTSKIN
@@ -332,7 +341,20 @@ consvar_t cv_voicevolume = Player("voicevolume", "100").min_max(0, 100);
 	consvar_t cv_discordstreamer = Player("discordstreamer", "Off").on_off();
 #endif
 
-consvar_t cv_drawdist = Player("drawdist", "Normal").values({
+#ifdef __3DS__
+#define RR3DS_DRAWDIST "Shorter" // 3DS: Shortest(3072) -> Shorter(4096): rings were popping in right in front of the face
+#define RR3DS_PRECIP "Shortest"
+#define RR3DS_MENUSKIP "MIN"
+#define RR3DS_DEPTH "8 bits"
+#define RR3DS_GLON_3DS "Off"
+#else
+#define RR3DS_DRAWDIST "Normal"
+#define RR3DS_PRECIP "Normal"
+#define RR3DS_MENUSKIP "Off"
+#define RR3DS_DEPTH "16 bits"
+#define RR3DS_GLON_3DS "On"
+#endif
+consvar_t cv_drawdist = Player("drawdist", RR3DS_DRAWDIST).values({
 	{3072,  "Shortest"},
 	{4096,  "Shorter"},
 	{6144,  "Short"},
@@ -344,7 +366,7 @@ consvar_t cv_drawdist = Player("drawdist", "Normal").values({
 	{0,     "Infinite"},
 });
 
-consvar_t cv_drawdist_precip = Player("drawdist_precip", "Normal").values({
+consvar_t cv_drawdist_precip = Player("drawdist_precip", RR3DS_PRECIP).values({
 	{256,  "Shortest"},
 	{512,  "Shorter"},
 	{768,  "Short"},
@@ -357,6 +379,13 @@ consvar_t cv_drawdist_precip = Player("drawdist_precip", "Normal").values({
 consvar_t cv_drawinput = Player("drawinput", "Off").on_off();
 consvar_t cv_ffloorclip = Player("ffloorclip", "On").on_off();
 
+#ifdef __3DS__
+// 3DS: from 35 to 60 (the screen is 60 Hz). Saved in ringconfig.cfg.
+consvar_t cv_fpscap = Player("fpscap", "35").values({
+	{TICRATE, "MIN"},
+	{60, "MAX"},
+});
+#else
 consvar_t cv_fpscap = Player("fpscap", "Match refresh rate").values({
 #ifdef DEVELOP
 	// Lower values are actually pretty useful for debugging interp problems!
@@ -368,9 +397,65 @@ consvar_t cv_fpscap = Player("fpscap", "Match refresh rate").values({
 	{-1, "Unlimited"},
 	{0, "Match refresh rate"},
 });
+#endif // __3DS__
 
 void SCR_ChangeFullscreen(void);
+#ifdef RR_PCGEN
+// The Video menu's "Display Mode" = saved PREFERENCE: 0 Window, 1 Fullscreen, 2 Borderless.
+// cv_fullscreen + cv_rrborderless = CURRENT state. F11 only changes the state (RR_ToggleDisplayMode):
+// with a Borderless preference it toggles Window <-> Borderless; with Window or Fullscreen, Window <-> Fullscreen.
+// The preference is applied at startup (RR_DisplayModeStartup, after the config is loaded).
+static void RR_DisplayModeChange(void);
+#ifdef _WIN32
+consvar_t cv_rrdisplaymode = Player("rrdisplaymode", "Fullscreen").values({
+	{0, "Window"}, {1, "Fullscreen"}, {2, "Borderless"},
+}).onchange(RR_DisplayModeChange);
+#else
+// Linux and others: Fullscreen is already a borderless desktop-sized fullscreen, and a borderless window
+// stays under the panel (taskbar), so there is no separate Borderless choice.
+consvar_t cv_rrdisplaymode = Player("rrdisplaymode", "Fullscreen").values({
+	{0, "Window"}, {1, "Fullscreen"},
+}).onchange(RR_DisplayModeChange);
+#endif
+#endif
 consvar_t cv_fullscreen = Player("fullscreen", "Yes").yes_no().onchange(SCR_ChangeFullscreen);
+#ifdef RR_PCGEN
+
+// st: 0 Window, 1 Fullscreen, 2 Borderless
+static void RR_ApplyDisplayState(int st)
+{
+	CV_StealthSetValue(&cv_rrborderless, st == 2);
+	CV_StealthSetValue(&cv_fullscreen, st == 1);
+	SCR_ChangeFullscreen();
+}
+static void RR_DisplayModeChange(void)
+{
+	RR_ApplyDisplayState(cv_rrdisplaymode.value);
+}
+void RR_ToggleDisplayMode(void)
+{
+	const bool inwindow = !cv_fullscreen.value && !cv_rrborderless.value;
+	RR_ApplyDisplayState(inwindow ? (cv_rrdisplaymode.value == 2 ? 2 : 1) : 0);
+}
+void RR_DisplayModeStartup(void)
+{
+	bool found = false;
+	if (FILE *f = fopen(configfile, "r"))
+	{
+		char line[256];
+		while (fgets(line, sizeof line, f))
+			if (!strncmp(line, "rrdisplaymode ", 14))
+			{
+				found = true;
+				break;
+			}
+		fclose(f);
+	}
+	if (!found) // legacy config: the preference is derived from the saved mode
+		CV_StealthSetValue(&cv_rrdisplaymode, cv_fullscreen.value ? 1 : (cv_rrborderless.value ? 2 : 0));
+	RR_ApplyDisplayState(cv_rrdisplaymode.value);
+}
+#endif
 
 // Sound system toggles, saved into the config
 void GameDigiMusic_OnChange(void);
@@ -392,7 +477,7 @@ void ItemFinder_OnChange(void);
 consvar_t cv_itemfinder = Player("itemfinder", "Off").flags(CV_NOSHOWHELP).on_off().onchange(ItemFinder_OnChange).dont_save();
 
 consvar_t cv_maxportals = Player("maxportals", "2").values({{0, "MIN"}, {12, "MAX"}}); // lmao rendering 32 portals, you're a card
-consvar_t cv_menuframeskip = Player("menuframeskip", "Off").values({
+consvar_t cv_menuframeskip = Player("menuframeskip", RR3DS_MENUSKIP).values({
 	{35, "MIN"},
 	{144, "MAX"},
 	{0, "Off"},
@@ -432,11 +517,156 @@ consvar_t cv_pauseifunfocused = Player("pauseifunfocused", "Yes").yes_no();
 
 extern CV_PossibleValue_t cv_renderer_t[];
 consvar_t cv_renderer = Player("renderer", "Software").flags(CV_NOLUA).values(cv_renderer_t).onchange(SCR_ChangeRenderer);
+#ifndef __3DS__
+// Video Options graphics API (PC). The game starts in Software; only OpenGL has a backend
+// for now. An API the PC does not support, or that has no backend yet, is rejected and falls back to OpenGL.
+// The API is chosen when the window is created, so changing it requires a restart. The user is asked and, if they accept,
+// the config is saved and another copy of the game is launched.
+// Single "Renderer" menu option: Software / Legacy GL / DirectX 9 / DirectX 9Ex (DX9 = Software over DX9)
+void RRGfx_SyncMenu(void)
+{
+	const int act = RRGfx_Active();
+	const int gl = (rendermode == render_opengl) ? 1 : 0;
+	CV_StealthSetValue(&cv_rrrenderer, act == RRGFX_DX9 ? 2 : act == RRGFX_DX9EX ? 3 :
+		act == RRGFX_VULKAN ? 4 + gl : act == RRGFX_DX12 ? 6 + gl : act == RRGFX_DX11 ? 8 + gl : gl);
+	CV_StealthSetValue(&cv_gfxapi, act); // in case the config held an old, unrecognized name
+}
+
+static void RRGfx_RestartResponse(INT32 ch);
+
+static void RRGfx_AskRestart(int api)
+{
+	M_StartMessage(
+		"Changing API",
+		va("The game needs to restart\nto use %s.\n\nRESTART NOW?", RRGfx_Name(api)),
+		RRGfx_RestartResponse,
+		MM_YESNO,
+		NULL,
+		NULL
+	);
+}
+
+static void RRGfx_RestartResponse(INT32 ch)
+{
+	if (ch == MA_YES)
+	{
+		M_SaveConfig(NULL);
+		RRGfx_SpawnSelf();
+		I_Quit();
+	}
+	else
+	{
+		CV_StealthSetValue(&cv_gfxapi, RRGfx_Active()); // keep the current API
+		CV_StealthSetValue(&cv_renderer, rendermode);
+		RRGfx_SyncMenu();
+	}
+}
+
+// LOW-END MODE (3DS-optimized logic, see RR_LOWEND in rr_config.h).
+// rr_lowend = the value for the current map: set in P_LoadLevel (off for netgames and replays).
+extern "C" int rr_lowend;
+int rr_lowend = 0;
+static void RR_LowEndChange(void)
+{
+	if (!menuactive)
+		return;
+	if (netgame && server)
+		M_StartMessage("Low-End Mode", M_GetText("Everyone in your game will switch\nwhen this round ends.\n"), NULL, MM_NOTHING, NULL, NULL);
+	else if (netgame)
+		M_StartMessage("Low-End Mode", M_GetText("In online games the host decides.\nThis takes effect the next time\nyou join a game.\n"), NULL, MM_NOTHING, NULL, NULL);
+	else if (gamestate == GS_LEVEL)
+		M_StartMessage("Low-End Mode", M_GetText("This takes effect on the next course.\n"), NULL, MM_NOTHING, NULL, NULL);
+}
+consvar_t cv_rrlowend = Player("rrlowend", "Off").on_off().onchange(RR_LowEndChange);
+
+// Ring Racers E (online between E builds only): netvars sent by the server (see rr_nete.c).
+// rrnetlowend = the match uses low-end mode (every client reads it in P_LoadLevel). Only changes between rounds.
+// rrnetlowwait = one bit per low-end player who waits as a spectator until the round ends.
+#ifdef RR_PCGEN
+extern "C" void RRNet_LowEndNetChanged(void);
+consvar_t cv_rrnetlowend = UnsavedNetVar("rrnetlowend", "Off").on_off().onchange_noinit(RRNet_LowEndNetChanged);
+consvar_t cv_rrnetlowwait = UnsavedNetVar("rrnetlowwait", "0").min_max(0, 65535);
+#endif
+
+// Hidden option (only changed by hand in ringconfigE.cfg: rrapirestart "On"): always switch API by restarting
+// the game instead of live. This is the "safe switch" in case live switching fails on some PC.
+consvar_t cv_rrapirestart = Player("rrapirestart", "Off").on_off();
+
+// "Borderless Window" in Video. In windowed mode: no borders, at the screen corner and with its size
+// (the game is scaled). Fullscreen takes precedence over this option. See RR_ApplyWindowBorder in sdl/i_video.cpp.
+void SCR_ChangeFullscreen(void);
+consvar_t cv_rrborderless = Player("rrborderless", "Off").on_off().dont_save().onchange(SCR_ChangeFullscreen); // current state; the preference is cv_rrdisplaymode
+static int s_wantRenderer = 1;
+
+static void RRGfx_ChangeRenderer(void)
+{
+	const int v = cv_rrrenderer.value;
+	// 4/5 = Vulkan, 6/7 = DirectX 12 (OpenGL through Mesa: Software or Legacy GL)
+	// 8/9 = DirectX 11 (OpenGL ES through ANGLE: Software or Legacy GL)
+	const int api = v == 2 ? RRGFX_DX9 : v == 3 ? RRGFX_DX9EX : (v == 4 || v == 5) ? RRGFX_VULKAN : (v == 6 || v == 7) ? RRGFX_DX12 : (v == 8 || v == 9) ? RRGFX_DX11 : RRGFX_OPENGL;
+	const int rend = (v == 1 || v == 5 || v == 7 || v == 9) ? 2 : 1;
+	if (api == RRGfx_Active())
+	{
+		// Legacy GL after having left it for D3D9: its state is stale, so a restart is required
+		if (rend == 2 && RRGfx_GLStale() && menuactive)
+		{
+			CV_StealthSetValue(&cv_renderer, rend);
+			RRGfx_AskRestart(api);
+			return;
+		}
+		CV_SetValue(&cv_renderer, rend);
+		return;
+	}
+	CV_StealthSetValue(&cv_renderer, rend); // saved to the config (for the restart)
+	s_wantRenderer = rend;
+	CV_SetValue(&cv_gfxapi, api);
+	s_wantRenderer = 1;
+	if (cv_gfxapi.value != api) // rejected (not supported)
+	{
+		CV_StealthSetValue(&cv_renderer, rendermode);
+		RRGfx_SyncMenu();
+	}
+}
+consvar_t cv_rrrenderer = Player("rrrenderer", "Software").flags(CV_NOLUA).values({
+	{0, "Software"}, {1, "Legacy GL"}, {2, "Direct3D 9"}, {3, "Direct3DEx 9"},
+	{4, "Software (Vulkan)"}, {5, "Legacy GL (Vulkan)"}, {6, "Software (DX12)"}, {7, "Legacy GL (DX12)"},
+	{8, "Software (DX11)"}, {9, "Legacy GL (DX11)"},
+}).dont_save().onchange(RRGfx_ChangeRenderer);
+
+static void RRGfx_ChangeAPI(void)
+{
+	const int api = cv_gfxapi.value;
+	if (api == RRGfx_Active())
+		return;
+	if (api != RRGFX_OPENGL && !RRGfx_Detected(api))
+		CONS_Alert(CONS_WARNING, "%s is not supported on this PC.\n", RRGfx_Name(api));
+	else if (api != RRGFX_OPENGL && !RRGfx_Implemented(api))
+		CONS_Alert(CONS_WARNING, "%s is not available yet.\n", RRGfx_Name(api));
+	else
+	{
+		// Live switch (no restart), unless the "safe switch" is requested or it is not possible
+		if (menuactive && !cv_rrapirestart.value && RRGfx_LiveOK(api, s_wantRenderer))
+		{
+			RRGfx_LiveSwitch(api, s_wantRenderer);
+			return;
+		}
+		// When loading the config (no menu open) the user is not prompted
+		if (menuactive)
+			RRGfx_AskRestart(api);
+		return;
+	}
+	CV_StealthSetValue(&cv_gfxapi, RRGfx_Active());
+}
+consvar_t cv_gfxapi = Player("gfxapi", "OpenGL").flags(CV_NOLUA).values({
+	{RRGFX_OPENGL, "OpenGL"}, {RRGFX_DX9, "Direct3D 9"}, {RRGFX_DX9EX, "Direct3DEx 9"}, {RRGFX_DX11, "DirectX 11"},
+	{RRGFX_DX12, "DirectX 12"}, {RRGFX_VULKAN, "Vulkan"},
+}).onchange(RRGfx_ChangeAPI);
+#endif
 consvar_t cv_parallelsoftware = Player("parallelsoftware", "On").on_off();
 
 consvar_t cv_renderview = Player("renderview", "On").values({{0, "Off"}, {1, "On"}, {2, "Force"}}).dont_save();
 consvar_t cv_rollingdemos = Player("rollingdemos", "On").on_off();
-consvar_t cv_scr_depth = Player("scr_depth", "16 bits").values({{8, "8 bits"}, {16, "16 bits"}, {24, "24 bits"}, {32, "32 bits"}});
+consvar_t cv_scr_depth = Player("scr_depth", RR3DS_DEPTH).values({{8, "8 bits"}, {16, "16 bits"}, {24, "24 bits"}, {32, "32 bits"}});
 
 //added : 03-02-98: default screen mode, as loaded/saved in config
 consvar_t cv_scr_width = Player("scr_width", "640").values(CV_Unsigned);
@@ -450,7 +680,11 @@ consvar_t cv_scr_y = Player("scr_y", "0.0").floating_point();
 consvar_t cv_display = Player("display", "0").values(CV_Unsigned).save();
 
 consvar_t cv_seenames = Player("seenames", "On").on_off();
+#ifdef __3DS__
+consvar_t cv_shadow = Player("shadow", "Off").on_off(); // 3DS: perf
+#else
 consvar_t cv_shadow = Player("shadow", "On").on_off();
+#endif
 consvar_t cv_showfocuslost = Player("showfocuslost", "Yes").yes_no();
 
 consvar_t cv_racesplits = Player("racesplits", "Leader").values({{0, "Off"}, {1, "Next"}, {2, "Leader"}}).save();
@@ -459,7 +693,7 @@ consvar_t cv_attacksplits = Player("attacksplits", "Next").values({{0, "Off"}, {
 void R_SetViewSize(void);
 consvar_t cv_showhud = Player("showhud", "Yes").yes_no().onchange(R_SetViewSize).dont_save();
 
-consvar_t cv_skybox = Player("skybox", "On").on_off();
+consvar_t cv_skybox = Player("skybox", "On").on_off(); // 3DS: On (design decision)
 
 // Display song credits
 consvar_t cv_songcredits = Player("songcredits", "On").on_off();
@@ -473,8 +707,23 @@ consvar_t cv_splitdevice = Player("splitdevice", "Off").on_off();
 void Splitplayers_OnChange(void);
 consvar_t cv_splitplayers = Player("splitplayers", "One").values({{1, "One"}, {2, "Two"}, {3, "Three"}, {4, "Four"}}).onchange(Splitplayers_OnChange).dont_save();
 
-consvar_t cv_ticrate = Player(cvlist_screen)("showfps", "No").yes_no();
+consvar_t cv_ticrate = Player(cvlist_screen)("showfps",
+#ifdef __3DS__
+	"Yes"
+#else
+	"No"
+#endif
+	).yes_no();
 consvar_t cv_tilting = Player("tilting", "On").on_off();
+#ifdef __3DS__
+// bottom screen (dummy/bottom_3ds.c): 0 = diagnostics, 1-3 = map + positions + BAIL
+consvar_t cv_3ds_bottom = Player("bottomscreen", "Map, Bail Right").values({
+	{0, "Debug Info"},
+	{1, "Map, Bail Right"},
+	{2, "Map, Bail Left"},
+	{3, "Map, Bail Bottom"},
+});
+#endif
 
 // first time memory
 consvar_t cv_tutorialprompt = Player("tutorialprompt", "On").on_off();
@@ -753,7 +1002,12 @@ void LiveStudioAudience_OnChange(void);
 #endif
 
 void Maxplayers_OnChange(void);
+#ifdef __3DS__
+// 3DS: at most 4 racers (you + 3 bots), enforced by the menu range itself
+consvar_t cv_maxplayers = NetVar("maxplayers", "4").min_max(1, 4).onchange_noinit(Maxplayers_OnChange);
+#else
 consvar_t cv_maxplayers = NetVar("maxplayers", "8").min_max(1, MAXPLAYERS).onchange_noinit(Maxplayers_OnChange);
+#endif
 
 consvar_t cv_shuffleloser = NetVar("shuffleloser", "On").on_off();
 
@@ -976,7 +1230,11 @@ extern CV_PossibleValue_t dummykartspeed_cons_t[];
 void DummyKartSpeed_OnChange(void);
 consvar_t cv_dummykartspeed = MenuDummy("dummykartspeed", "Gear 2").values(dummykartspeed_cons_t).onchange(DummyKartSpeed_OnChange);
 
+#ifdef __3DS__
+consvar_t cv_dummymatchbots = MenuDummy("dummymatchbots", "Lv.3").values({ // 3DS: bots on by default (Racers N = N-1 bots)
+#else
 consvar_t cv_dummymatchbots = MenuDummy("dummymatchbots", "Off").values({
+#endif
 	{0, "Off"},
 	{1, "Lv.1"},
 	{2, "Lv.2"},
@@ -1471,7 +1729,7 @@ consvar_t cv_voice_allowservervoice = NetVar("voice_allowservervoice", "Off")
 
 	extern "C" CV_PossibleValue_t glshaders_cons_t[];
 	consvar_t cv_glallowshaders = OpenGL("gr_allowclientshaders", "On").on_off().network().dont_save();
-	consvar_t cv_glshaders = OpenGL("gr_shaders", "On").values(glshaders_cons_t);
+	consvar_t cv_glshaders = OpenGL("gr_shaders", RR3DS_GLON_3DS).values(glshaders_cons_t);
 
 	extern "C" CV_PossibleValue_t glanisotropicmode_cons_t[];
 	extern "C" void CV_glanisotropic_OnChange(void);
@@ -1495,7 +1753,7 @@ consvar_t cv_voice_allowservervoice = NetVar("voice_allowservervoice", "Off")
 	consvar_t cv_glmodellighting = OpenGL("gr_modellighting", "Off").on_off();
 #endif
 
-	consvar_t cv_glmodels = OpenGL("gr_models", "On").on_off();
+	consvar_t cv_glmodels = OpenGL("gr_models", RR3DS_GLON_3DS).on_off();
 	consvar_t cv_glshearing = OpenGL("gr_shearing", "Off").values({{0, "Off"}, {1, "On"}, {2, "Third-person"}});
 	consvar_t cv_glskydome = OpenGL("gr_skydome", "On").on_off();
 	consvar_t cv_glsolvetjoin = OpenGL("gr_solvetjoin", "On").on_off().dont_save();

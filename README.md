@@ -6,6 +6,23 @@
   </a>
 </p>
 
+> ## Unofficial fork: Ring Racers for the Nintendo 3DS (and Ring Racers E for PC)
+>
+> This repository is a fork of Kart Krew Dev's Ring Racers (base `49beb6b`, v2.4) that adds:
+>
+> - a **port to the Old Nintendo 3DS** (devkitPro / citro3d): renderer, memory manager, audio, asset pipeline,
+>   bottom-screen UI and a large set of performance changes. It runs, but slowly on heavy maps.
+> - the shared **"low-end" mode** and the PC edition **Ring Racers E** (multiple graphics APIs, online play for E only).
+>
+> Start here: [docs/3DS_PORT.md](docs/3DS_PORT.md) (changes, known problems, what is missing) ·
+> [docs/PERFORMANCE.md](docs/PERFORMANCE.md) (measurements) · [docs/BUILD_3DS.md](docs/BUILD_3DS.md) ·
+> [docs/CONFIG.md](docs/CONFIG.md) · [docs/TOOLS.md](docs/TOOLS.md) · [wiki](docs/wiki/Home.md) · [journey, sacrifices and dead ends](docs/wiki/Journey%20Sacrifices%20Dead%20Ends.md).
+>
+> Not affiliated with Kart Krew Dev. No game assets are included; you convert your own copy.
+>
+> The 3DS patch tool and the conversion of textures and music to 3DS formats were made with the help of Claude (Anthropic), an AI assistant.
+
+
 Dr. Robotnik's Ring Racers is a kart racing video game originally based on the 3D Sonic the Hedgehog fangame [Sonic Robo Blast 2](https://srb2.org/), itself based on a modified version of [Doom Legacy](http://doomlegacy.sourceforge.net/).
 
 Ring Racers' source code is available to users under the GNU General Public License version 2.0 or higher.

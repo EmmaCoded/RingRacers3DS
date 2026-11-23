@@ -1,0 +1,57 @@
+; Ring Racers 3DS - static geometry shader (world cache)
+; pos = projection * modelView * (x,y,z,1); uv passed straight through (units 0 and 1).
+; color: rgb = tint (u8 -> [0,1]); the alpha byte carries the sector's LIGHT LEVEL
+; (0-255). Distance light like Software mode (see world.v.pica):
+; output color.a = how much light is left (1 = not darkened).
+.fvec projection[4], modelView[4]
+.constf myconst(0.0, 1.0, 0.00392156862, 0.0625)
+.constf myconst2(92.0, 31.0, 0.03125, 127.0)
+.constf myconst3(0.0588235294, 15.0, 4.24, 63.6)
+.constf myconst4(0.26, 40.3, 0.0, 0.0)
+.alias ones myconst.yyyy
+.alias inv255 myconst.zzzz
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+.proc main
+	mov r0.xyz, inpos
+	mov r0.w, ones
+	dp4 r1.x, modelView[0], r0
+	dp4 r1.y, modelView[1], r0
+	dp4 r1.z, modelView[2], r0
+	dp4 r1.w, modelView[3], r0
+	dp4 outpos.x, projection[0], r1
+	dp4 outpos.y, projection[1], r1
+	dp4 outpos.z, projection[2], r1
+	dp4 outpos.w, projection[3], r1
+	mov outtc0, intex
+	mov outtc1, intex
+	; startmap = (15 - min(L/17, 15)) * 4.24 = 63.6 - min(L/17,15)*4.24
+	mul r3.x, myconst3.x, inclr.w
+	min r3.x, myconst3.y, r3.x
+	mul r3.x, myconst3.z, r3.x
+	add r3.x, myconst3.w, -r3.x
+	; cap = 40.3 - 0.26*L
+	mul r3.y, myconst4.x, inclr.w
+	add r3.y, myconst4.y, -r3.y
+	; lightz = clamp(z/16, 0, 127); scale = 92/(lightz+1)
+	mul r2.x, myconst.w, -r1.z
+	max r2.x, myconst.x, r2.x
+	min r2.x, myconst2.w, r2.x
+	add r2.x, myconst.y, r2.x
+	rcp r2.x, r2.x
+	mul r2.x, myconst2.x, r2.x
+	add r2.x, r3.x, -r2.x
+	max r2.x, r3.y, r2.x
+	max r2.x, myconst.x, r2.x
+	min r2.x, myconst2.y, r2.x
+	mul r2.x, myconst2.z, r2.x
+	add r2.x, myconst.y, -r2.x
+	mul outclr.xyz, inv255, inclr.xyz
+	mov outclr.w, r2.x
+	end
+.end

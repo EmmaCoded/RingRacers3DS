@@ -1745,12 +1745,38 @@ void G_RecordDemo(const char *name)
 	strcpy(demoname, name);
 	strcat(demoname, ".lmp");
 	maxsize = 1024 * 1024 * cv_netdemosize.value;
+#ifdef __3DS__
+	// crash when entering a prison: 6 contiguous MB to record the replay
+	// (netdemosize=6) do not exist on Old 3DS. 1 MB is enough for several minutes;
+	// if it fills up, the game stops recording by itself (no crash).
+	if (maxsize > 1024 * 1024) maxsize = 1024 * 1024;
+#endif
 
 //	if (demobuf.buffer)
 //		Z_Free(demobuf.buffer);
 
 	// FIXME: this file doesn't manage its memory and actually free this when it's done using it
 	Z_Free(demobuf.buffer);
+#ifdef __3DS__
+	// crash on "retry" with the touch screen: the heap is already fragmented and there is no contiguous 1 MB
+	// (I_ERROR Out of memory 1048616, p_saveg.cpp). The size is probed; if it does not fit it is lowered, and if not even 64 KB
+	// fit, the replay is not recorded (the game keeps going).
+	while (maxsize >= 64 * 1024)
+	{
+		void *probe = malloc((size_t)maxsize + 256);
+		if (probe)
+		{
+			free(probe);
+			break;
+		}
+		maxsize >>= 1;
+	}
+	if (maxsize < 64 * 1024)
+	{
+		CONS_Printf("[DEMO] out of memory while recording the replay: not recorded\n");
+		return;
+	}
+#endif
 	P_SaveBufferAlloc(&demobuf, maxsize);
 	Z_SetUser(demobuf.buffer, (void**)&demobuf.buffer);
 	demobuf.p = NULL;

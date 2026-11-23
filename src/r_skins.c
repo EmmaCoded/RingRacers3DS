@@ -19,6 +19,7 @@
 #include "r_local.h"
 #include "st_stuff.h"
 #include "w_wad.h"
+#include "r_patch.h"
 #include "z_zone.h"
 #include "m_misc.h"
 #include "info.h" // spr2names
@@ -32,6 +33,7 @@
 #include "k_kart.h"
 #include "m_random.h"
 #include "s_sound.h"
+#include "i_sound.h"
 #if 0
 #include "k_kart.h" // K_KartResetPlayerColor
 #endif
@@ -43,6 +45,143 @@
 
 INT32 numskins = 0;
 skin_t **skins;
+
+#ifdef __3DS__
+// LAZY CHARACTERS. chars_idx.pk3 carries only S_SKIN + faces (XTRA) + sounds of
+// the 63 vanilla characters; each one's sprites are in <rr3ds_charsdir>/<name>.pk3
+// and are mounted the first time somebody uses that character (R_3DS_EnsureSkin).
+// Bots only pick unmounted characters while fewer than skins_max are mounted.
+#include "rr_config.h"
+char rr3ds_charsdir[256] = "";
+static UINT8 rr3ds_lazy[MAXSKINS];
+static int rr3ds_lazyLoading = 0; // R_LoadSkinSprites: no I_Error (index or mount)
+static int rr3ds_mounted = 0, rr3ds_mountMax = -1;
+static UINT16 rr3ds_wadOf[MAXSKINS]; // wad number of a mounted lazy character (0 = not mounted)
+extern void W_3DS_Unmount(UINT16 wad);
+extern UINT16 W_3DS_ReuseStub(void);
+extern void RR3DS_PreForget(UINT16 wad);
+static UINT16 W_CheckForSkinMarkerInPwad(UINT16 wadid, UINT16 startlump);
+static void R_LoadSkinSprites(UINT16 wadnum, UINT16 *lump, UINT16 *lastlump, skin_t *skin);
+
+boolean R_3DS_SkinIsLazy(INT32 skinnum)
+{
+	return (skinnum >= 0 && skinnum < numskins && rr3ds_lazy[skinnum]);
+}
+
+void R_3DS_EnsureSkin(INT32 skinnum)
+{
+	if (!R_3DS_SkinIsLazy(skinnum))
+		return;
+	rr3ds_lazy[skinnum] = 0; // whatever happens, do not retry every frame
+	{
+		skin_t *skin = skins[skinnum];
+		const precise_t t0 = I_GetPreciseTime();
+		char path[320];
+		UINT16 wad, lump, last = 0;
+		snprintf(path, sizeof path, "%s" PATHSEP "%s.pk3", rr3ds_charsdir, skin->name);
+		// mainfile=true: without saving gamedata or marking the game as modified
+		// (it only brings sprites). W_InitFile returns the number of lumps, not the wad.
+		if (W_InitFile(path, true, false, NULL) == INT16_MAX)
+		{
+			CONS_Printf("[SKINS] could NOT mount %s\n", path);
+			return;
+		}
+		wad = W_3DS_ReuseStub(); // fills a free slot left by a released character, or stays last
+		rr3ds_wadOf[skinnum] = wad;
+		lump = W_CheckForSkinMarkerInPwad(wad, 0);
+		if (lump == INT16_MAX)
+		{
+			CONS_Printf("[SKINS] %s has no S_SKIN\n", path);
+			return;
+		}
+		rr3ds_lazyLoading = 1;
+		R_LoadSkinSprites(wad, &lump, &last, skin);
+		rr3ds_lazyLoading = 0;
+		{ extern void RR3DS_PreSkin(UINT16 wad); RR3DS_PreSkin(wad); } // its already-known sprites
+		rr3ds_mounted++;
+		CONS_Printf("[SKINS] mounted %s (skin %d, %d mounted, %u ms)\n", skin->name, skinnum,
+			rr3ds_mounted, (unsigned)((I_GetPreciseTime() - t0) * 1000 / I_GetPrecisePrecision())); { extern void RR3DS_LinMark(const char *); RR3DS_LinMark("skin mounted"); }
+	}
+}
+
+// Frees the RAM of every character except the ones in keep[] (NULL = keep none): the character-select
+// screen calls this when it is left. Lazy (vanilla) characters are unmounted completely; the others
+// (mods) lose their cached sprite patches and voices. Characters in use by a race are never touched.
+void R_3DS_ReleaseSkins(const UINT8 *keep)
+{
+	UINT8 inuse[MAXSKINS];
+	INT32 s, i, r, n = 0;
+	memset(inuse, 0, sizeof inuse);
+	if (gamestate != GS_MENU)
+	{
+		for (i = 0; i < MAXPLAYERS; i++)
+		{
+			if (!playeringame[i]) continue;
+			if (players[i].skin >= 0 && players[i].skin < MAXSKINS) inuse[players[i].skin] = 1;
+			if (players[i].fakeskin >= 0 && players[i].fakeskin < MAXSKINS) inuse[players[i].fakeskin] = 1;
+		}
+	}
+	for (s = 0; s < numskins; s++)
+	{
+		skin_t *skin = skins[s];
+		if ((keep && keep[s]) || inuse[s] || rr3ds_lazy[s])
+			continue;
+		if (gamestate == GS_MENU) // its voices (they reload when needed)
+			for (i = 0; i < NUMSKINSOUNDS; i++)
+				if (skin->soundsid[i] > 0 && skin->soundsid[i] < NUMSFX && S_sfx[skin->soundsid[i]].data)
+					I_FreeSfx(&S_sfx[skin->soundsid[i]]);
+		if (rr3ds_wadOf[s])
+		{
+			const UINT16 wad = rr3ds_wadOf[s];
+			RR3DS_PreForget(wad);
+			for (i = 0; i < NUMPLAYERSPRITES * 2; i++) // forget the frames: they point into that wad
+			{
+				Z_Free(skin->sprites[i].spriteframes);
+				skin->sprites[i].spriteframes = NULL;
+				skin->sprites[i].numframes = 0;
+			}
+			W_3DS_Unmount(wad);
+			rr3ds_wadOf[s] = 0;
+			rr3ds_lazy[s] = 1; // mounts again the next time somebody uses it
+			rr3ds_mounted--;
+			n++;
+		}
+		else // mod: its pk3 stays mounted, only the cached sprite patches go
+		{
+			for (i = 0; i < NUMPLAYERSPRITES * 2; i++)
+			{
+				const spritedef_t *sd = &skin->sprites[i];
+				for (r = 0; r < sd->numframes; r++)
+				{
+					INT32 rot;
+					for (rot = 0; rot < 16; rot++)
+					{
+						const lumpnum_t ln = sd->spriteframes[r].lumppat[rot];
+						wadfile_t *w;
+						if (ln == LUMPERROR || WADFILENUM(ln) >= numwadfiles) continue;
+						w = wadfiles[WADFILENUM(ln)];
+						if (LUMPNUM(ln) < w->numlumps && w->patchcache && w->patchcache[LUMPNUM(ln)])
+							Patch_Free((patch_t *)w->patchcache[LUMPNUM(ln)]), n++;
+					}
+				}
+			}
+		}
+	}
+	CONS_Printf("[SKINS] released %d (%d mounted now)\n", (int)n, rr3ds_mounted);
+	{ extern void RR3DS_LinMark(const char *); RR3DS_LinMark("skins released"); }
+}
+
+// bots do not pick unmounted characters if skins_max are already mounted
+static boolean R_3DS_BotSkinBlocked(INT32 skinnum)
+{
+	if (!R_3DS_SkinIsLazy(skinnum))
+		return false;
+	if (rr3ds_mountMax < 0)
+		rr3ds_mountMax = RRCfg_Int("skins_max", 12);
+	return (rr3ds_mounted >= rr3ds_mountMax);
+}
+#endif
+spriteinfo_t R_EmptySprInfo; // shared empty info (skin->sprinfo[n]==NULL)
 
 unloaded_skin_t *unloadedskins = NULL;
 
@@ -238,6 +377,11 @@ boolean R_SkinUsable(INT32 playernum, INT32 skinnum, boolean demoskins)
 		return true;
 	}
 
+#ifdef __3DS__
+	if (playernum < 0 && demoskins && R_3DS_BotSkinBlocked(skinnum))
+		return false; // cap on mounted characters (bots)
+#endif
+
 	if (K_CanChangeRules(true) && (cv_forceskin.value == skinnum))
 	{
 		// Being forced to play as this character by the server
@@ -397,6 +541,9 @@ static void SetSkin(player_t *player, INT32 skinnum)
 	if (demo.playback)
 		skinnum = demo.skinlist[skinnum].mapping;
 
+#ifdef __3DS__
+	R_3DS_EnsureSkin(skinnum);
+#endif
 	skin_t *skin = skins[skinnum];
 
 	player->skin = skinnum;
@@ -490,6 +637,10 @@ void SetPlayerSkinByNum(INT32 playernum, INT32 skinnum)
 // Set mo skin but not player_t skin, for ironman
 void SetFakePlayerSkin(player_t* player, INT32 skinid)
 {
+#ifdef __3DS__
+	if (!demo.playback)
+		R_3DS_EnsureSkin(skinid);
+#endif
 	if (player->fakeskin != skinid)
 	{
 		if (player->fakeskin != MAXSKINS)
@@ -763,6 +914,10 @@ static void R_LoadSkinSprites(UINT16 wadnum, UINT16 *lump, UINT16 *lastlump, ski
 	for (sprite2 = 0; sprite2 < free_spr2; sprite2++)
 		R_AddSingleSpriteDef(spr2names[sprite2], &skin->sprites[sprite2], wadnum, *lump, *lastlump);
 
+#ifdef __3DS__
+	if (rr3ds_lazyLoading)
+		return; // index (faces only) or lazy mount
+#endif
 	if (skin->sprites[0].numframes == 0)
 		I_Error("R_LoadSkinSprites: no frames found for sprite SPR2_%s\n", spr2names[0]);
 }
@@ -1023,6 +1178,16 @@ next_token:
 		free(buf2);
 
 		// Add sprites
+#ifdef __3DS__
+		if (strstr(wadfiles[wadnum]->filename, "chars_idx"))
+		{
+			rr3ds_lazy[numskins] = 1; // sprites later (R_3DS_EnsureSkin)
+			rr3ds_lazyLoading = 1;
+			R_LoadSkinSprites(wadnum, &lump, &lastlump, skin);
+			rr3ds_lazyLoading = 0;
+		}
+		else
+#endif
 		R_LoadSkinSprites(wadnum, &lump, &lastlump, skin);
 		//ST_LoadFaceGraphics(numskins); -- nah let's do this elsewhere
 
@@ -1102,6 +1267,9 @@ next_token:
 			}
 		}
 
+#ifdef __3DS__
+		CONS_Printf("[3DS] skin %d loaded: %s (wad %d)\n", numskins, skin->name, wadnum);
+#endif
 		numskins++;
 	}
 	return;

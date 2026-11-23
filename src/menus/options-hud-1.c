@@ -12,6 +12,9 @@
 #include "../k_menu.h"
 #include "../r_main.h"	// cv_showhud
 #include "../v_video.h" // cv_constextsize
+#ifdef __3DS__
+extern consvar_t cv_3ds_bottom;
+#endif
 
 menuitem_t OPTIONS_HUD[] =
 {
@@ -33,6 +36,10 @@ menuitem_t OPTIONS_HUD[] =
 
 	{IT_STRING | IT_CVAR, "Show \"FOCUS LOST\"", "Displays \"FOCUS LOST\" when the game cannot accept inputs.",
 		NULL, {.cvar = &cv_showfocuslost}, 0, 0},
+#ifdef __3DS__
+	{IT_STRING | IT_CVAR, "Bottom Screen", "3DS lower screen: minimap, positions and a touch Bail button (left/right/bottom), or debug info.",
+		NULL, {.cvar = &cv_3ds_bottom}, 0, 0},
+#endif
 
 	{IT_SPACE | IT_NOTHING, NULL,  NULL,
 		NULL, {NULL}, 0, 0},

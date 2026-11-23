@@ -16,6 +16,7 @@
 #include "../mserv.h"
 #include "../v_video.h"
 #include "../m_easing.h"
+#include "../rr_nete.h" // Ring Racers E
 
 static void draw_routine(void)
 {
@@ -42,15 +43,30 @@ static void draw_routine(void)
 		);
 	}
 
+#ifndef RR_PCGEN // Ring Racers E: never public (Direct Join only)
 	V_DrawRightAlignedThinString(
 		294 + tx,
 		98,
 		!CV_IsSetToDefault(&cv_advertise) ? warningflags : highlightflags,
 		va("(Public: %s)", cv_advertise.string)
 	);
+#endif
 
+#ifdef RR_PCGEN
+	RRNet_DrawMyIPsHint(44, BASEVIDHEIGHT - 10, true); // Y = My IP Addresses (instead of the list option)
+#else
 	M_DrawMasterServerReminder();
+#endif
 }
+
+#ifdef RR_PCGEN
+// Y = My IP Addresses (the option fell outside the list box)
+static boolean input_routine(INT32 key)
+{
+	(void)key;
+	return RRNet_MyIPsInput(0);
+}
+#endif
 
 static void tick_routine(void)
 {
@@ -109,7 +125,11 @@ menu_t PLAY_MP_HostDef = {
 	tick_routine,
 	NULL,
 	M_MPResetOpts,
+#ifdef RR_PCGEN
+	input_routine
+#else
 	NULL
+#endif
 };
 
 void M_PopupMasterServerRules(void)

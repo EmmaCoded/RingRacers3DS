@@ -207,6 +207,47 @@ struct GenerateBlendTables_State
 static void R_GenerateBlendTables_Core(struct GenerateBlendTables_State *state);
 static void R_GenerateTranslucencyTable(UINT8 *table, RGBA_t* sourcepal, int style, UINT8 blendamt);
 
+#ifdef __3DS__
+// the 3 large tables (add/subtract/reverse subtract: 3 x 10 x 64 KB = 2.3 MB in
+// PU_STATIC, r_draw.cpp:218 in [ZOWN]) no longer live in RAM: they are read from
+// blend_<hash>.bin (64 KB per level) into a cache of 4 slots when the 2D layer
+// requests them. Only used in HUD effects. If there is no file: as before.
+static FILE *rr_blendf = NULL;
+// configurable slots (rr_config blend_slots, default 8, max 12; 64 KB each,
+// are reserved when used). With 4 they overwrote each other and re-read ~1.5 MB from the SD per race.
+#define RR_BSLOTS 12
+#include "rr_config.h"
+static UINT8 *rr_bslot[RR_BSLOTS]; static INT32 rr_bkey[RR_BSLOTS]; static UINT32 rr_buse[RR_BSLOTS], rr_bclock;
+static INT32 rr_bn = 0; static UINT32 rr_bSeen, rr_bMisses;
+static UINT8 *RR3DS_StreamBlend(INT32 k, INT32 level)
+{
+	const INT32 key = k * 16 + level;
+	INT32 best = 0;
+	if (!rr_bn)
+	{
+		rr_bn = RRCfg_Int("blend_slots", 8);
+		if (rr_bn < 2) rr_bn = 2;
+		if (rr_bn > RR_BSLOTS) rr_bn = RR_BSLOTS;
+		for (INT32 i = 0; i < RR_BSLOTS; i++) rr_bkey[i] = -1;
+	}
+	for (INT32 i = 0; i < rr_bn; i++)
+	{
+		if (rr_bkey[i] == key) { rr_buse[i] = ++rr_bclock; return rr_bslot[i]; }
+		if (rr_buse[i] < rr_buse[best]) best = i;
+	}
+	if (!rr_bslot[best]) rr_bslot[best] = static_cast<UINT8 *>(Z_MallocAlign(0x10000, PU_STATIC, NULL, 16));
+	const long off = (long)k * (NUMTRANSTABLES + 1) * 0x10000 + (long)level * 0x10000;
+	if (fseek(rr_blendf, off, SEEK_SET) || fread(rr_bslot[best], 1, 0x10000, rr_blendf) != 0x10000)
+		memset(rr_bslot[best], 0, 0x10000);
+	rr_bkey[best] = key; rr_buse[best] = ++rr_bclock;
+	// how many different tables are requested and how many reads so far (to tune blend_slots)
+	if (key < 32 && !(rr_bSeen & (1u << key))) rr_bSeen |= 1u << key;
+	if ((++rr_bMisses & 15) == 0)
+		CONS_Printf("[BLEND] reads=%u distinct=%d slots=%d\n", (unsigned)rr_bMisses, __builtin_popcount(rr_bSeen), (int)rr_bn);
+	return rr_bslot[best];
+}
+#endif
+
 static void R_AllocateBlendTables(void)
 {
 	INT32 i;
@@ -215,6 +256,25 @@ static void R_AllocateBlendTables(void)
 	{
 		if (i == blendtab_modulate)
 			continue;
+#ifdef __3DS__
+		// if blend_<hash>.bin exists, these 3 are streamed (not reserved)
+		{
+			UINT32 h = 2166136261u;
+			for (INT32 k = 0; k < 256; k++)
+			{
+				h = (h ^ pMasterPalette[k].rgba) * 16777619u;
+				h = (h ^ pGammaCorrectedPalette[k].rgba) * 16777619u;
+			}
+			char pth[96]; FILE *tf;
+			snprintf(pth, sizeof pth, "romfs:/blend_%08x.bin", (unsigned)h);
+			if (!(tf = fopen(pth, "rb")))
+			{
+				snprintf(pth, sizeof pth, "sdmc:/3ds/RingRacers3ds/cache/blend_%08x.bin", (unsigned)h);
+				tf = fopen(pth, "rb");
+			}
+			if (tf) { fclose(tf); blendtables[i] = NULL; continue; }
+		}
+#endif
 		blendtables[i] = static_cast<UINT8 *>(Z_MallocAlign((NUMTRANSTABLES + 1) * 0x10000, PU_STATIC, NULL, 16));
 	}
 
@@ -222,7 +282,7 @@ static void R_AllocateBlendTables(void)
 	blendtables[blendtab_modulate] = static_cast<UINT8 *>(Z_MallocAlign(0x10000, PU_STATIC, NULL, 16));
 }
 
-#ifdef HAVE_THREADS
+#if defined(HAVE_THREADS) && !defined(__3DS__)
 static void R_GenerateBlendTables_Thread(void *userdata)
 {
 	struct GenerateBlendTables_State *state = static_cast<struct GenerateBlendTables_State *>(userdata);
@@ -260,7 +320,10 @@ void R_InitTranslucencyTables(void)
 
 void R_GenerateBlendTables(void)
 {
-#ifdef HAVE_THREADS
+	// on 3DS HAVE_THREADS is defined (stub threads) and it took the thread branch,
+	// which never used the table cache -> they kept taking 34 s. Now 3DS
+	// always uses the branch with the cache (blend_<hash>.bin).
+#if defined(HAVE_THREADS) && !defined(__3DS__)
 	// Allocate copies for the worker thread since the originals can be freed in the main thread.
 	struct GenerateBlendTables_State *state = static_cast<struct GenerateBlendTables_State *>(malloc(sizeof *state));
 	size_t palsize = 256 * sizeof(RGBA_t);
@@ -273,6 +336,81 @@ void R_GenerateBlendTables(void)
 #else
 	struct GenerateBlendTables_State state = {pMasterPalette, pGammaCorrectedPalette};
 
+#ifdef __3DS__
+	// these tables (31 x 64 KB) took ~34 s to compute on every
+	// startup (520 million color lookups). They are stored precomputed:
+	// romfs:/blend_<hash>.bin (ships in the .3dsx) or sdmc:/3ds/ringracers/.
+	// The hash covers both palettes: if they change (gamma, another palette) the
+	// are recomputed and a new file is saved. The data is EXACTLY the
+	// same the game computes.
+	{
+		UINT32 h = 2166136261u;
+		for (INT32 k = 0; k < 256; k++)
+		{
+			h = (h ^ pMasterPalette[k].rgba) * 16777619u;
+			h = (h ^ pGammaCorrectedPalette[k].rgba) * 16777619u;
+		}
+		char path[96];
+		const size_t big = (NUMTRANSTABLES + 1) * 0x10000;
+		const INT32 bigtabs[3] = { blendtab_add, blendtab_subtract, blendtab_reversesubtract };
+		FILE *f = NULL;
+		snprintf(path, sizeof path, "romfs:/blend_%08x.bin", (unsigned)h);
+		f = fopen(path, "rb");
+		if (!f)
+		{
+			snprintf(path, sizeof path, "sdmc:/3ds/RingRacers3ds/cache/blend_%08x.bin", (unsigned)h);
+			f = fopen(path, "rb");
+		}
+		if (rr_blendf) { fclose(rr_blendf); rr_blendf = NULL; for (INT32 k = 0; k < RR_BSLOTS; k++) rr_bkey[k] = -1; } // new palette
+		if (!f && !blendtables[blendtab_add]) // no file for this palette: tables in RAM as before
+		{
+			const INT32 bt[3] = { blendtab_add, blendtab_subtract, blendtab_reversesubtract };
+			for (INT32 k = 0; k < 3; k++)
+				blendtables[bt[k]] = static_cast<UINT8 *>(Z_MallocAlign((NUMTRANSTABLES + 1) * 0x10000, PU_STATIC, NULL, 16));
+		}
+		if (f && !blendtables[blendtab_add]) // streaming mode (see RR3DS_StreamBlend)
+		{
+			if (fseek(f, 3L * (NUMTRANSTABLES + 1) * 0x10000, SEEK_SET) == 0
+				&& fread(blendtables[blendtab_modulate], 1, 0x10000, f) == 0x10000)
+			{
+				rr_blendf = f;
+				CONS_Printf("[BLEND] tables streamed from %s (saves ~2.3 MB)\n", path);
+				return;
+			}
+			fclose(f); f = NULL;
+			// bad file: go back to the in-RAM tables
+			const INT32 bt[3] = { blendtab_add, blendtab_subtract, blendtab_reversesubtract };
+			for (INT32 k = 0; k < 3; k++)
+				blendtables[bt[k]] = static_cast<UINT8 *>(Z_MallocAlign((NUMTRANSTABLES + 1) * 0x10000, PU_STATIC, NULL, 16));
+		}
+		if (f)
+		{
+			boolean ok = true;
+			for (INT32 k = 0; k < 3 && ok; k++)
+				ok = fread(blendtables[bigtabs[k]], 1, big, f) == big;
+			if (ok) ok = fread(blendtables[blendtab_modulate], 1, 0x10000, f) == 0x10000;
+			fclose(f);
+			if (ok)
+			{
+				CONS_Printf("[BLEND] tables read from %s\n", path);
+				return;
+			}
+		}
+		CONS_Printf("[BLEND] computing tables (slow, this time only)...\n");
+		R_GenerateBlendTables_Core(&state);
+		snprintf(path, sizeof path, "sdmc:/3ds/RingRacers3ds/cache/blend_%08x.bin", (unsigned)h);
+		f = fopen(path, "wb");
+		if (f)
+		{
+			for (INT32 k = 0; k < 3; k++)
+				fwrite(blendtables[bigtabs[k]], 1, big, f);
+			fwrite(blendtables[blendtab_modulate], 1, 0x10000, f);
+			fclose(f);
+			CONS_Printf("[BLEND] saved to %s\n", path);
+		}
+		return;
+	}
+#endif
 	R_GenerateBlendTables_Core(&state);
 #endif
 }
@@ -328,6 +466,19 @@ UINT8 *R_GetBlendTable(int style, INT32 alphalevel)
 
 	// Lactozilla: Returns the equivalent to AST_TRANSLUCENT
 	// if no alpha style matches any of the blend tables.
+#ifdef __3DS__
+	if (rr_blendf && !blendtables[blendtab_add])
+	{
+		const INT32 lv = ClipTransLevel(alphalevel);
+		switch (style)
+		{
+			case AST_ADD: return RR3DS_StreamBlend(0, lv);
+			case AST_SUBTRACT: return RR3DS_StreamBlend(1, lv);
+			case AST_REVERSESUBTRACT: return RR3DS_StreamBlend(2, lv);
+			default: break;
+		}
+	}
+#endif
 	switch (style)
 	{
 		case AST_ADD:

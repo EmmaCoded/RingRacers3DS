@@ -15,6 +15,21 @@
 using namespace srb2;
 using namespace hwr2;
 
+#ifdef __3DS__
+#include "../doomdef.h"
+#include "../command.h"
+// [TWODEE] log only when a peak rises (verts/idx/cmds/lists per frame)
+void srb2::hwr2::twodee_3ds_note(std::size_t lists, std::size_t verts, std::size_t idx, std::size_t cmds, std::size_t vsz, std::size_t csz)
+{
+	static std::size_t pl, pv, pi, pc;
+	if (lists <= pl && verts <= pv && idx <= pi && cmds <= pc) return;
+	if (lists > pl) pl = lists; if (verts > pv) pv = verts; if (idx > pi) pi = idx; if (cmds > pc) pc = cmds;
+	CONS_Printf("[TWODEE] peak lists=%u verts=%u idx=%u cmds=%u (vert=%uB cmd=%uB; reserved %u/%u/%u)\n",
+		(unsigned)pl, (unsigned)pv, (unsigned)pi, (unsigned)pc, (unsigned)vsz, (unsigned)csz,
+		(unsigned)kRR3dsVertCap, (unsigned)kRR3dsIdxCap, (unsigned)kRR3dsCmdCap);
+}
+#endif
+
 Twodee::Twodee() = default;
 Twodee::Twodee(const Twodee&) = default;
 Twodee::Twodee(Twodee&&) noexcept = default;

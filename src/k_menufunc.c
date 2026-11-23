@@ -16,6 +16,7 @@
 #endif
 
 #include "k_menu.h"
+#include "k_profiles.h"
 
 #include "doomdef.h"
 #include "d_main.h"
@@ -26,6 +27,8 @@
 #include "f_finale.h"
 #include "m_misc.h"
 #include "m_cond.h"
+#include "m_argv.h" // -rrmenutest
+#include "screen.h" // cv_rrrenderer (-rrswitchtest)
 #include "music.h"
 
 #ifdef HAVE_DISCORDRPC
@@ -203,8 +206,11 @@ static void M_ChangeCvar(INT32 choice)
 		choice != -1)
 	{
 		M_StartMessage(
-			"Switching to Legacy GL",
-			"Legacy GL is \x85" "INCOMPLETE and BROKEN.\x80\n"
+			"Switching renderer",
+			"Hardware rendering can make better use\n"
+			"of your PC's hardware, but not every API\n"
+			"is available on every PC, and it does not\n"
+			"guarantee better compatibility than Software.\n"
 			"\n"
 			"ARE YOU SURE?",
 			M_ChangeCvarResponse,
@@ -341,7 +347,11 @@ boolean M_Responder(event_t *ev)
 			case KEY_F11: // Fullscreen
 				// F11 can always be used to toggle
 				// fullscreen, it's a safe key.
+#ifdef RR_PCGEN
+				RR_ToggleDisplayMode(); // state only, not the menu preference
+#else
 				CV_AddValue(&cv_fullscreen, 1);
+#endif
 				return true;
 		}
 	}
@@ -454,7 +464,11 @@ boolean M_Responder(event_t *ev)
 				return true;
 
 			case KEY_F11: // Fullscreen
+#ifdef RR_PCGEN
+				RR_ToggleDisplayMode(); // state only, not the menu preference
+#else
 				CV_AddValue(&cv_fullscreen, 1);
+#endif
 				return true;
 
 			// Spymode on F12 handled in game logic
@@ -838,6 +852,27 @@ void M_StartControlPanel(void)
 			M_GonerBGImplyPassageOfTime();
 		}
 
+#ifdef __3DS__
+		// 3DS: the First Boot Experience (calibration) is NO longer skipped; the keyboard
+		// virtual with a controller works there (PASSWORD option).
+
+		// The profile is normally created in that intro. If only the
+		// "guest" profile (0) exists, we create one with default values (automatic name,
+		// default controls = the ones i_video_3ds.c maps) and apply it,
+		// so the "choose/create profile" screen does not appear either, since it asks for
+		// typing a name with a keyboard.
+		if (cv_currprofile.value == -1)
+		{
+			if (PR_GetNumProfiles() < 2)
+			{
+				PR_InitNewProfile();
+				PR_SaveProfiles();
+			}
+			CV_StealthSetValue(&cv_ttlprofilen, 1);
+			PR_ApplyProfile(1, 0);
+		}
+#endif
+
 		if (M_GameTrulyStarted() == false)
 		{
 			// Are you ready for the First Boot Experience?
@@ -902,10 +937,23 @@ void M_StartControlPanel(void)
 //
 // M_ClearMenus
 //
+#ifdef __3DS__
+// on 3DS the game almost never exits through I_Quit (Azahar is closed / HOME):
+// ringconfig.cfg is saved when menus close and when leaving Options.
+void M_SaveConfig(const char *filename);
+static void M_3DS_SaveConfig(void)
+{
+	M_SaveConfig(NULL);
+}
+#endif
+
 void M_ClearMenus(boolean callexitmenufunc)
 {
 	if (!menuactive)
 		return;
+#ifdef __3DS__
+	M_3DS_SaveConfig();
+#endif
 
 	CON_ClearHUD();
 
@@ -1043,6 +1091,10 @@ void M_GoBack(INT32 choice)
 
 	noFurtherInput = true;
 	currentMenu->lastOn = itemOn;
+#ifdef __3DS__
+	if (currentMenu == &OPTIONS_MainDef)
+		M_3DS_SaveConfig();
+#endif
 
 	if (currentMenu->prevMenu)
 	{
@@ -1412,6 +1464,52 @@ void M_Ticker(void)
 	INT32 i;
 
 	HU_TickSongCredits();
+
+#ifndef __3DS__
+	// (PC): keyboard-free menu test: -rrmenutest N opens Video > Advanced with the cursor on renderer N
+	{
+		static boolean rrmp = false;
+		static INT32 rrmp_tics = 0;
+		// -rrswitchtest 9,7,1 = with the menu open, switches cv_rrrenderer to each value every 6 s (live API switch)
+		static INT32 rrcp_tics = 0, rrcp_i = 0;
+		if ((gamestate == GS_TITLESCREEN || gamestate == GS_LEVEL) && M_CheckParm("-rrswitchtest") && M_IsNextParm()
+			&& ++rrcp_tics % (6*TICRATE) == 0)
+		{
+			const char *lst = M_GetNextParm();
+			INT32 k = 0;
+			while (*lst && k < rrcp_i)
+				if (*lst++ == ',')
+					k++;
+			if (*lst)
+			{
+				CONS_Printf("[TEST] switch %d -> renderer %d\n", rrcp_i, atoi(lst));
+				const boolean wasopen = menuactive;
+				if (!wasopen)
+					M_StartControlPanel(); // the live switch is only done with the menu open
+				CV_SetValue(&cv_rrrenderer, atoi(lst));
+				if (!wasopen)
+					M_ClearMenus(true);
+				rrcp_i++;
+			}
+		}
+		if (!rrmp && (gamestate == GS_TITLESCREEN || gamestate == GS_LEVEL) && ++rrmp_tics > 70 && M_CheckParm("-rrmenutest"))
+		{
+			const INT32 want = M_IsNextParm() ? atoi(M_GetNextParm()) : 0;
+			rrmp = true;
+			M_StartControlPanel();
+			M_InitOptions(0);
+			M_RefreshAdvancedVideoOptions();
+			M_SetupNextMenu(&OPTIONS_VideoAdvancedDef, true);
+			for (i = 0; i < currentMenu->numitems; i++)
+				if ((currentMenu->menuitems[i].status & IT_TYPE) == IT_CALL && currentMenu->menuitems[i].mvar1 == want)
+				{
+					itemOn = i;
+					currentMenu->lastOn = i;
+					break;
+				}
+		}
+	}
+#endif
 
 	if (!menuactive)
 	{

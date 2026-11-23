@@ -93,6 +93,14 @@ struct Draw2dList
 	static constexpr const std::size_t kMaxVertices = 65536;
 };
 
+#ifdef __3DS__
+// fixed capacities (tuned from the [TWODEE] peaks)
+constexpr std::size_t kRR3dsCmdCap = 512;
+constexpr std::size_t kRR3dsVertCap = 2048;
+constexpr std::size_t kRR3dsIdxCap = 3072;
+void twodee_3ds_note(std::size_t lists, std::size_t verts, std::size_t idx, std::size_t cmds, std::size_t vsz, std::size_t csz);
+#endif
+
 class Draw2dQuadBuilder;
 class Draw2dVerticesBuilder;
 
@@ -116,6 +124,33 @@ public:
 
 	Draw2dQuadBuilder begin_quad() noexcept;
 	Draw2dVerticesBuilder begin_verts() noexcept;
+
+	// 3DS: empty WITHOUT releasing memory. Before, "g_2d = Twodee()" on every
+	// frame freed the vectors and they grew again by doubling -> with 64 MB
+	// fragmented heaps an emplace_back requested a contiguous block that was not there (bad_alloc
+	// loading 765Stadium).
+	void reset_keep() noexcept
+	{
+#ifdef __3DS__
+		// measure peaks (printed in twodee.cpp only when they rise) and, the first time,
+		// reserve fixed capacity so growth does not request large blocks.
+		{
+			std::size_t pv = 0, pi = 0, pc = 0;
+			for (auto& l : lists_) { pv += l.vertices.size(); pi += l.indices.size(); pc += l.cmds.size(); }
+			twodee_3ds_note(lists_.size(), pv, pi, pc, sizeof(TwodeeVertex), sizeof(Draw2dCmd));
+			if (lists_.empty()) lists_.emplace_back();
+			if (lists_[0].cmds.capacity() < kRR3dsCmdCap)
+			{
+				lists_[0].cmds.reserve(kRR3dsCmdCap);
+				lists_[0].vertices.reserve(kRR3dsVertCap);
+				lists_[0].indices.reserve(kRR3dsIdxCap);
+			}
+		}
+#endif
+		if (lists_.size() > 1) lists_.resize(1);
+		for (auto& l : lists_) { l.vertices.clear(); l.indices.clear(); l.cmds.clear(); }
+		current_verts_.clear(); current_indices_.clear();
+	}
 
 	typename std::vector<Draw2dList>::iterator begin() noexcept { return lists_.begin(); }
 	typename std::vector<Draw2dList>::iterator end() noexcept { return lists_.end(); }

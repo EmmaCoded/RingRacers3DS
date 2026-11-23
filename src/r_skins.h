@@ -70,8 +70,12 @@ struct skin_t
 
 	// contains super versions too
 	spritedef_t sprites[NUMPLAYERSPRITES*2];
-	spriteinfo_t sprinfo[NUMPLAYERSPRITES*2];
+	// sparse: NULL = shared empty info (saves ~100 KB per skin)
+	spriteinfo_t *sprinfo[NUMPLAYERSPRITES*2];
 };
+
+extern spriteinfo_t R_EmptySprInfo;
+#define R_SkinSprInfo(sk, n) ((sk)->sprinfo[n] ? (sk)->sprinfo[n] : &R_EmptySprInfo)
 
 enum facepatches {
 	FACE_RANK = 0,
@@ -116,6 +120,12 @@ void R_PatchSkins(UINT16 wadnum, boolean mainfile);
 INT32 R_SkinAvailable(const char *name);
 INT32 R_SkinAvailableEx(const char *name, boolean demoskins);
 boolean R_SkinUsable(INT32 playernum, INT32 skinnum, boolean demoskins);
+#ifdef __3DS__
+boolean R_3DS_SkinIsLazy(INT32 skinnum); // lazy characters
+void R_3DS_EnsureSkin(INT32 skinnum);
+void R_3DS_ReleaseSkins(const UINT8 *keep); // NULL = none; keep[MAXSKINS] = flags
+extern char rr3ds_charsdir[256];
+#endif
 UINT8 *R_GetSkinAvailabilities(boolean demolock, INT32 botforcecharacter);
 boolean R_CanShowSkinInDemo(INT32 skinnum);
 

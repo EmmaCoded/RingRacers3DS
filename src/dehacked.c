@@ -212,7 +212,13 @@ static void DEH_LoadDehackedFile(MYFILE *f, boolean mainfile)
 			if (fastcmp(word, "FREESLOT"))
 			{
 				// This is not a major mod.
+#ifdef __3DS__ // old 3DS debugging
+				CONS_Printf("dehacked: calling readfreeslots\n");
+#endif
 				readfreeslots(f);
+#ifdef __3DS__
+				CONS_Printf("dehacked: readfreeslots returned\n");
+#endif
 				continue;
 			}
 			else if (fastcmp(word, "MAINCFG"))

@@ -142,7 +142,11 @@ boolean Net_GetNetStat(void)
 // -----------------------------------------------------------------
 // Some structs and functions for acknowledgement of packets
 // -----------------------------------------------------------------
+#ifdef __3DS__
+#define MAXACKPACKETS 24 // no online on 3DS (was 96; >URGENTFREESLOTNUM)
+#else
 #define MAXACKPACKETS 96 // Minimum number of nodes (wat)
+#endif
 #define MAXACKTOSEND 96
 #define URGENTFREESLOTNUM 10
 #define ACKTOSENDTIMEOUT (TICRATE/11)

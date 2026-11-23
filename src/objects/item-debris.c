@@ -9,6 +9,7 @@
 //-----------------------------------------------------------------------------
 
 #include "../doomdef.h"
+#include "../rr_config.h" // RR_LOWEND (PC low-end mode)
 #include "../d_player.h"
 #include "../m_random.h"
 #include "../k_kart.h"
@@ -64,6 +65,15 @@ spawn_debris
 
 	debris_type(debris) = config->type;
 	debris_bouncesleft(debris) = 1;
+#ifdef RR_LOWEND_CODE
+	// 3DS: visual-only chunks. With NO collisions at all (no objects,
+	// walls, or floor/ceiling) and a fixed lifetime of 14 tics (~400 ms).
+	if (RR_LOWEND)
+	{
+		debris->flags |= MF_NOCLIPTHING|MF_NOCLIP|MF_NOCLIPHEIGHT;
+		debris->fuse = 14;
+	}
+#endif
 
 	P_InstaThrust(debris,
 			config->angle + angle,
@@ -188,11 +198,23 @@ Obj_SpawnItemDebrisEffects
 
 	config.type = DEBRIS_BETA;
 
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND)
+	{
+	// 3DS: 3 BETA chunks instead of 5 (no game RNG, does not affect replays)
+	spawn_debris(&config,   3*ANGLE_22h/2);
+	spawn_debris(&config,   0);
+	spawn_debris(&config, -(3*ANGLE_22h/2));
+	}
+	else
+#endif
+	{
 	spawn_debris(&config,   3*ANGLE_22h/2);
 	spawn_debris(&config,   3*ANGLE_22h/4);
 	spawn_debris(&config,   0);
 	spawn_debris(&config, -(3*ANGLE_22h/4));
 	spawn_debris(&config, -(3*ANGLE_22h/2));
+	}
 
 	spawn_cloud(collectible, collector, base_speed);
 
@@ -213,7 +235,11 @@ Obj_ItemDebrisThink (mobj_t *debris)
 
 	rotate3d(debris);
 
+#ifdef RR_LOWEND_CODE
+	if (frame % 3 == 1 && (!RR_LOWEND || (leveltime & 1))) // 3DS: half the trails
+#else
 	if (frame % 3 == 1)
+#endif
 	{
 		mobj_t *ghost = P_SpawnGhostMobj(debris);
 

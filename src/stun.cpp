@@ -19,6 +19,9 @@
 #include <cstdlib>
 #elif defined (__APPLE__)
 #include <CommonCrypto/CommonRandom.h>
+#elif defined (__3DS__)
+#include <3ds.h>
+#include <cstring>
 #else
 #error "Need CSPRNG."
 #endif
@@ -101,6 +104,11 @@ csprng
 	CCRandomGenerateBytes(buffer, size);
 #elif defined (__FreeBSD__) || defined (__NetBSD__) || defined (__OpenBSD__)
 	arc4random_buf(buffer, size);
+#elif defined (__3DS__)
+	// 3DS: use PS_GenerateRandomBytes from libctru (PS module TRNG)
+	psInit();
+	PS_GenerateRandomBytes(buffer, size);
+	psExit();
 #endif
 }
 

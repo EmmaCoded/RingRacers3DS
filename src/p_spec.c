@@ -59,6 +59,9 @@
 
 // Not sure if this is necessary, but it was in w_wad.c, so I'm putting it here too -Shadow Hog
 #include <errno.h>
+// (rr_config.h also on PC: RR_DIAGPRINT)
+#include "rr_config.h"
+
 
 mobj_t *skyboxviewpnts[16]; // array of MT_SKYBOX viewpoint mobjs
 mobj_t *skyboxcenterpnts[16]; // array of MT_SKYBOX centerpoint mobjs
@@ -74,6 +77,9 @@ typedef struct
 	INT32 basepic;   ///< The start flat number
 	INT32 numpics;   ///< Number of frames in the animation
 	tic_t speed;     ///< Number of tics for which each frame is shown
+	INT32 laststep;  // /< last leveltime/speed applied (-1 = none)
+	tic_t nexttic;   // /< leveltime at which the frame changes (avoids dividing every tic)
+	SINT8 used;      // /< (3DS): -1 not computed, 0 no side of the map uses it, 1 it is used
 } anim_t;
 
 #if defined(_MSC_VER)
@@ -204,6 +210,9 @@ void P_InitPicAnims(void)
 	}
 
 	// Define the last one
+	// If no ANIMDEFS lump was found, animdefs is still NULL — allocate one sentinel slot
+	if (animdefs == NULL)
+		GrowAnimDefs();
 	animdefs[maxanims].istexture = -1;
 	strncpy(animdefs[maxanims].endname, "", 9);
 	strncpy(animdefs[maxanims].startname, "", 9);
@@ -233,15 +242,46 @@ void P_InitPicAnims(void)
 
 		if (lastanim->numpics < 2)
 		{
+#ifdef __3DS__
+			// 3DS texture pack: the order may not match that of
+			// the original pk3 files. Skip the animation instead of closing.
+			RR_DIAGPRINT("[3DS] ANIMDEFS: invalid cycle %s..%s, ignored\n",
+				animdefs[i].startname, animdefs[i].endname);
+			continue;
+#endif
 			free(anims);
 			I_Error("P_InitPicAnims: bad cycle from %s to %s",
 				animdefs[i].startname, animdefs[i].endname);
 		}
 
 		lastanim->speed = LONG(animdefs[i].speed);
+#ifdef __3DS__
+		// LARGE animated textures (e.g. 765's 7SXL screen, 512x384) are
+		// were re-uploaded to the GPU on every frame change. Animate them more slowly.
+		// slow_anim=1 = original speed. Only textures >= 256x256.
+		if (lastanim->istexture && lastanim->basepic >= 0 && lastanim->basepic < numtextures
+			&& textures[lastanim->basepic]
+			&& (INT32)textures[lastanim->basepic]->width * textures[lastanim->basepic]->height >= 256*256)
+		{
+			static int rrSlow = -1;
+			if (rrSlow < 0) rrSlow = RRCfg_Int("slow_anim", 3);
+			if (rrSlow > 1)
+			{
+				RR_DIAGPRINT("[SLOWANIM] %s %dx%d speed %d -> %d\n", animdefs[i].startname,
+					textures[lastanim->basepic]->width, textures[lastanim->basepic]->height,
+					(int)lastanim->speed, (int)(lastanim->speed * rrSlow));
+				lastanim->speed *= rrSlow;
+			}
+		}
+#endif
+		lastanim->laststep = -1;
+		lastanim->nexttic = 0;
+		lastanim->used = -1;
 		lastanim++;
 	}
 	lastanim->istexture = -1;
+	{ anim_t *a_; long np_ = 0, rate_ = 0; for (a_ = anims; a_ < lastanim; a_++) { np_ += a_->numpics; rate_ += a_->numpics * 100L / (a_->speed ? a_->speed : 1); }
+	RR_DIAGPRINT("[ANIMS] n=%d, sumpics=%ld, writes/tic x100=%ld\n",(int)(lastanim - anims), np_, rate_); }
 	R_ClearTextureNumCache(false);
 
 	// Clear animdefs now that we're done with it.
@@ -6089,15 +6129,60 @@ void P_UpdateSpecials(void)
 
 	levelflat_t *foundflats; // for flat animation
 
+#ifdef __3DS__
+	static precise_t sp_a, sp_b, sp_c; static int sp_n; precise_t sp_t0 = I_GetPreciseTime(), sp_t1, sp_t2;
+#endif
 	// LEVEL TIMER
 	P_CheckTimeLimit();
 
 	// POINT LIMIT
 	P_CheckPointLimit();
+#ifdef __3DS__
+	sp_t1 = I_GetPreciseTime(); sp_a += sp_t1 - sp_t0;
+#endif
 
 	// ANIMATE TEXTURES
+#ifdef __3DS__
+	// do not animate textures that no side of the map uses (909 anims = ~4300 writes/tic)
+	if (anims < lastanim && anims->used == -1 && sides && numsides && numtextures > 0)
+	{
+		UINT8 *tu = (UINT8 *)calloc((size_t)numtextures, 1);
+		if (tu)
+		{
+			size_t si;
+			for (si = 0; si < numsides; si++)
+			{
+				INT32 t[3] = { sides[si].toptexture, sides[si].midtexture, sides[si].bottomtexture };
+				int k;
+				for (k = 0; k < 3; k++)
+					if (t[k] >= 0 && t[k] < numtextures)
+						tu[t[k]] = 1;
+			}
+			for (anim = anims; anim < lastanim; anim++)
+			{
+				INT32 q;
+				anim->used = anim->istexture ? 0 : 1;
+				for (q = 0; q < anim->numpics && anim->used == 0; q++)
+					if (anim->basepic + q >= 0 && anim->basepic + q < numtextures && tu[anim->basepic + q])
+						anim->used = 1;
+			}
+			free(tu);
+		}
+	}
+#endif
 	for (anim = anims; anim < lastanim; anim++)
 	{
+#ifdef __3DS__
+		if (anim->used == 0)
+			continue;
+#endif
+		// only recompute when the animation frame changes
+		INT32 step;
+		if (anim->laststep != -1 && leveltime < anim->nexttic && leveltime + anim->speed >= anim->nexttic)
+			continue;
+		step = (INT32)(leveltime/anim->speed);
+		anim->nexttic = (step + 1) * anim->speed;
+		anim->laststep = step;
 		for (i = 0; i < anim->numpics; i++)
 		{
 			pic = anim->basepic + ((leveltime/anim->speed + i) % anim->numpics);
@@ -6106,6 +6191,9 @@ void P_UpdateSpecials(void)
 		}
 	}
 
+#ifdef __3DS__
+	sp_t2 = I_GetPreciseTime(); sp_b += sp_t2 - sp_t1;
+#endif
 	// ANIMATE FLATS
 	/// \todo do not check the non-animate flat.. link the animated ones?
 	/// \note its faster than the original anywaysince it animates only
@@ -6123,6 +6211,15 @@ void P_UpdateSpecials(void)
 				foundflats->u.flat.lumpnum = foundflats->u.flat.baselumpnum + ((leveltime/foundflats->speed + foundflats->animseq) % foundflats->numpics);
 		}
 	}
+#ifdef __3DS__
+	sp_c += I_GetPreciseTime() - sp_t2;
+	if (++sp_n >= 175)
+	{
+		const double us = 1000000.0 / (double)I_GetPrecisePrecision() / sp_n;
+		RR_DIAGPRINT("[SPEC] us/tic: limits=%.0f anims=%.0f flats=%.0f (flats n=%d)\n", sp_a * us, sp_b * us, sp_c * us, (int)numlevelflats);
+		sp_a = sp_b = sp_c = 0; sp_n = 0;
+	}
+#endif
 }
 
 //

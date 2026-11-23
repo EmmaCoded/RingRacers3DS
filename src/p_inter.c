@@ -13,6 +13,7 @@
 /// \brief Handling interactions (i.e., collisions)
 
 #include "doomdef.h"
+#include "rr_config.h" // RR_LOWEND (PC low-end mode)
 #include "i_system.h"
 #include "am_map.h"
 #include "g_game.h"
@@ -2266,6 +2267,11 @@ void P_KillMobj(mobj_t *target, mobj_t *inflictor, mobj_t *source, UINT8 damaget
 
 					cur->flags &= ~MF_NOGRAVITY;
 					cur->tics = TICRATE;
+#ifdef __3DS__
+					// 3DS: the broken pieces live 1/3 of the time and do not collide with things
+					cur->tics = TICRATE / 3;
+					cur->flags |= MF_NOCLIPTHING;
+#endif
 					cur->frame &= ~FF_ANIMATE; // Stop animating the propellers
 
 					cur->hitlag = target->hitlag;
@@ -2283,7 +2289,11 @@ void P_KillMobj(mobj_t *target, mobj_t *inflictor, mobj_t *source, UINT8 damaget
 					const fixed_t jaggedness = 4;
 					angle_t launchangle;
 					UINT8 i;
+#ifdef __3DS__
+					for (i = 0; i < 2; i++, dir += ANG60 * 3) // 3DS: 2 audience members instead of 6
+#else
 					for (i = 0; i < 6; i++, dir += ANG60)
+#endif
 					{
 						cur = P_SpawnMobj(
 							target->x, target->y,
@@ -4533,6 +4543,11 @@ void P_FlingBurst
 {
 	mobj_t *mo = P_SpawnMobjFromMobj(player->mo, 0, 0, 0, objType);
 	P_SetTarget(&mo->target, player->mo);
+#ifdef RR_LOWEND_CODE
+	// the debt spike is visual only (nobody collides with it: it is neither solid nor special),
+	// but when moving it checked every nearby object (~1 ms each on 765). fling_nocol=0 turns it off.
+	{ extern int rr3ds_flingNoCol; if (RR_LOWEND && objType == MT_DEBTSPIKE && rr3ds_flingNoCol) mo->flags |= MF_NOCLIPTHING; }
+#endif
 
 	mo->threshold = 10; // not useful for spikes
 	mo->fuse = objFuse;

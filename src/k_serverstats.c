@@ -12,6 +12,7 @@
 /// \file  k_serverstats.c
 /// \brief implements methods for serverside stat tracking.
 
+#include <errno.h>
 #include "doomtype.h"
 #include "d_main.h" // pandf
 #include "byteptr.h" // READ/WRITE macros
@@ -175,6 +176,11 @@ void SV_SaveStats(void)
 	if (!FIL_WriteFile(va(pandf, srb2home, SERVERSTATSFILE), save.buffer, length))
 	{
 		P_SaveBufferFree(&save);
+#ifdef __3DS__
+		extern unsigned I_3DS_SdError(void);
+		CONS_Printf("[STATS] could not save srvstats (errno=%d fatfs=%u), ignored\n", errno, I_3DS_SdError());
+		return;
+#endif
 		I_Error("Couldn't save server stats. Are you out of disk space / playing in a protected folder?");
 	}
 	P_SaveBufferFree(&save);

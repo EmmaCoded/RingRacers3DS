@@ -20,6 +20,8 @@
 #include "../m_cond.h" // Condition Sets
 #include "../k_color.h"
 #include "../z_zone.h"
+#include "../i_system.h" // I_Error (3DS)
+#include "../console.h" // CONS_Printf (3DS)
 
 //#define CHARSELECT_DEVICEDEBUG
 
@@ -219,6 +221,11 @@ static void M_SetupProfileGridPos(setup_player_t *p)
 
 	if (i == -1)
 		i = 0;
+#ifdef __3DS__
+	CONS_Printf("[3DS] GridPos: numskins=%d skin='%s' i=%d\n", numskins, pr->skinname, i);
+	if (numskins <= 0 || skins == NULL || skins[i] == NULL)
+		I_Error("3DS: no characters loaded (numskins=%d)", numskins);
+#endif
 
 	// While we're here, read follower values.
 	p->followern = K_FollowerAvailable(pr->follower);
@@ -1522,6 +1529,22 @@ void M_CharacterSelectTick(void)
 
 boolean M_CharacterSelectQuit(void)
 {
+#ifdef __3DS__
+	// Leaving the screen: only the characters the players confirmed stay in RAM (going back: none).
+	UINT8 keep[MAXSKINS];
+	UINT8 i;
+	boolean any = false;
+	memset(keep, 0, sizeof keep);
+	for (i = 0; i < setup_numplayers && i < MAXSPLITSCREENPLAYERS; i++)
+	{
+		if (setup_player[i].mdepth >= CSSTEP_READY && setup_player[i].skin >= 0 && setup_player[i].skin < MAXSKINS)
+		{
+			keep[setup_player[i].skin] = 1;
+			any = true;
+		}
+	}
+	R_3DS_ReleaseSkins(any ? keep : NULL);
+#endif
 	return true;
 }
 

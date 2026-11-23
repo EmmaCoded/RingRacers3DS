@@ -23,8 +23,16 @@
 #include "m_argv.h"
 #include "m_cond.h"
 #include "g_game.h"
+#include "i_system.h" // I_GetPreciseTime (meter [SAVE])
 #include "r_skins.h"
 #include "z_zone.h"
+#ifdef __3DS__
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#include <unistd.h> // ftruncate
+#endif
 
 namespace fs = std::filesystem;
 
@@ -269,13 +277,22 @@ void srb2::save_ng_gamedata()
 	fs::path savepath { static_cast<std::string_view>(savepath_string) };
 	fs::path baksavepath { static_cast<std::string_view>(srb2::format("{}/{}.bak", srb2home, gamedataname_s)) };
 
+#ifdef __3DS__
+	const precise_t rrA = I_GetPreciseTime();
+#endif
 	JsonValue ngdata_json { JsonObject() };
 	to_json(ngdata_json, ng);
+#ifdef __3DS__
+	const precise_t rrB = I_GetPreciseTime();
+#endif
 
 	if (fs::exists(savepath))
 	{
 		try
 		{
+#ifdef __3DS__
+			{ std::error_code ec; fs::remove(baksavepath, ec); } // rename does not overwrite on 3DS
+#endif
 			fs::rename(savepath, baksavepath);
 		}
 		catch (const fs::filesystem_error& ex)
@@ -284,6 +301,50 @@ void srb2::save_ng_gamedata()
 			return;
 		}
 	}
+
+#ifdef __3DS__
+	// the 3DS SD card takes ~1.2 s to write 110 KB in chunks that grow the
+	// file little by little. Here: build everything in memory, reserve the final size at once
+	// (ftruncate) and write in a SINGLE call without a stdio buffer. (Untested on console.)
+	try
+	{
+		const precise_t rrC = I_GetPreciseTime();
+		srb2::Vector<std::byte> ubjson = ngdata_json.to_ubjson();
+		const precise_t rrD = I_GetPreciseTime();
+
+		const uint32_t major = static_cast<uint32_t>(GD_VERSION_MAJOR);
+		const size_t total = 6 + ubjson.size();
+		std::byte buf[6]; // header (no extra malloc: the heap is fragmented)
+		buf[0] = std::byte(major & 0xFF);
+		buf[1] = std::byte((major >> 8) & 0xFF);
+		buf[2] = std::byte((major >> 16) & 0xFF);
+		buf[3] = std::byte((major >> 24) & 0xFF);
+		buf[4] = std::byte(static_cast<uint8_t>(GD_VERSION_MINOR));
+		buf[5] = std::byte(static_cast<uint8_t>(gamedata->evercrashed));
+
+		String savepathstring = savepath.string();
+		std::FILE *f = std::fopen(savepathstring.c_str(), "wb");
+		if (!f)
+			throw std::runtime_error("could not open ringdata for writing");
+		std::setvbuf(f, nullptr, _IONBF, 0);
+		const int trunc_ok = ftruncate(fileno(f), (off_t)total);
+		size_t written = std::fwrite(buf, 1, 6, f);
+		written += std::fwrite(ubjson.data(), 1, ubjson.size(), f);
+		const int close_it = std::fclose(f);
+		if (written != total || close_it != 0)
+			throw std::runtime_error("incomplete write of ringdata");
+
+		const double ms = 1000.0 / (double)I_GetPrecisePrecision();
+		CONS_Printf("[SAVE2] tojson=%.0f ms rename=%.0f ms ubjson=%.0f ms (%u bytes) write=%.0f ms (direct, reserve=%s)\n",
+			(double)(rrB - rrA) * ms, (double)(rrC - rrB) * ms, (double)(rrD - rrC) * ms,
+			(unsigned)total, (double)(I_GetPreciseTime() - rrD) * ms, trunc_ok == 0 ? "si" : "no");
+	}
+	catch (const std::exception& ex)
+	{
+		CONS_Alert(CONS_ERROR, "NG Gamedata save failed. Check directory for a ringdata.dat.bak. %s\n", ex.what());
+	}
+	return;
+#endif
 
 	try
 	{
@@ -295,9 +356,23 @@ void srb2::save_ng_gamedata()
 		srb2::io::write(static_cast<uint8_t>(GD_VERSION_MINOR), file); // minor/flags
 		srb2::io::write(static_cast<uint8_t>(gamedata->evercrashed), file); // dirty (crash recovery)
 
+#ifdef __3DS__
+		const precise_t rrC = I_GetPreciseTime();
+#endif
 		srb2::Vector<std::byte> ubjson = ngdata_json.to_ubjson();
+#ifdef __3DS__
+		const precise_t rrD = I_GetPreciseTime();
+#endif
 		srb2::io::write_exact(file, tcb::as_bytes(tcb::make_span(ubjson)));
 		file.close();
+#ifdef __3DS__
+		{
+			const double ms = 1000.0 / (double)I_GetPrecisePrecision();
+			CONS_Printf("[SAVE2] tojson=%.0f ms rename=%.0f ms ubjson=%.0f ms (%u bytes) write=%.0f ms\n",
+				(double)(rrB - rrA) * ms, (double)(rrC - rrB) * ms, (double)(rrD - rrC) * ms,
+				(unsigned)ubjson.size(), (double)(I_GetPreciseTime() - rrD) * ms);
+		}
+#endif
 	}
 	catch (const std::exception& ex)
 	{
@@ -313,6 +388,10 @@ void srb2::save_ng_gamedata()
 // Saves the main data file, which stores information such as emblems found, etc.
 void G_SaveGameData(void)
 {
+#ifdef __3DS__
+	// measure how long saving takes (~5 s stall when finishing a prison)
+	const precise_t rrT0 = I_GetPreciseTime();
+#endif
 	try
 	{
 		srb2::save_ng_gamedata();
@@ -322,9 +401,17 @@ void G_SaveGameData(void)
 		CONS_Alert(CONS_ERROR, "Gamedata save failed\n");
 		return;
 	}
+#ifdef __3DS__
+	const precise_t rrT1 = I_GetPreciseTime();
+#endif
 
 	// Also save profiles here.
 	PR_SaveProfiles();
+#ifdef __3DS__
+	CONS_Printf("[SAVE] gamedata=%.0f ms profiles=%.0f ms\n",
+		(double)(rrT1 - rrT0) * 1000.0 / (double)I_GetPrecisePrecision(),
+		(double)(I_GetPreciseTime() - rrT1) * 1000.0 / (double)I_GetPrecisePrecision());
+#endif
 
 	#ifdef DEVELOP
 		CONS_Alert(CONS_NOTICE, M_GetText("Gamedata saved.\n"));

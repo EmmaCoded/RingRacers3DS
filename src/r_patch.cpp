@@ -40,6 +40,18 @@ patch_t *Patch_Create(softwarepatch_t *source, size_t srcsize, void *dest)
 		patch->height     = SHORT(source->height);
 		patch->leftoffset = SHORT(source->leftoffset);
 		patch->topoffset  = SHORT(source->topoffset);
+
+#ifdef __3DS__
+		// On 32-bit ARM, a corrupt or misaligned lump can produce a
+		// absurd width that blows up Z_Calloc. Validate before allocating.
+		if (patch->width <= 0 || patch->width > 4096 || size > srcsize)
+		{
+			I_OutputMsg("Patch_Create: invalid lump (width=%d size=%u srcsize=%u), skipping\n",
+				patch->width, (unsigned)size, (unsigned)srcsize);
+			return patch;
+		}
+#endif
+
 		patch->columnofs  = static_cast<INT32*>(Z_Calloc(size, PU_PATCH_DATA, NULL));
 
 		for (col = 0; col < patch->width; col++)

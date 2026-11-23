@@ -44,6 +44,12 @@ menu_t OPTIONS_VideoModesDef = {
 // setup video mode menu
 static void M_VideoModeMenu(void)
 {
+#ifdef __3DS__
+	// 3DS has a fixed resolution (400x240 top screen); no mode selection available.
+	optionsmenu.vidm_nummodes = 0;
+	optionsmenu.vidm_selected = 0;
+	optionsmenu.vidm_column_size = 1;
+#else
 	INT32 i, j, vdup, nummodes;
 	UINT32 width, height;
 	const char *desc;
@@ -109,14 +115,26 @@ static void M_VideoModeMenu(void)
 	}
 
 	optionsmenu.vidm_column_size = (optionsmenu.vidm_nummodes+2) / 3;
+#endif // __3DS__
 }
 
 // special menuitem key handler for video mode list
 void M_HandleVideoModes(INT32 ch)
 {
-
 	const UINT8 pid = 0;
 	(void)ch;
+
+#ifdef __3DS__
+	// 3DS has a fixed resolution; no mode switching possible.
+	if (M_MenuBackPressed(pid))
+	{
+		M_SetMenuDelay(pid);
+		if (currentMenu->prevMenu)
+			M_SetupNextMenu(currentMenu->prevMenu, false);
+		else
+			M_ClearMenus(true);
+	}
+#else
 
 	if (optionsmenu.vidm_testingmode > 0)
 	{
@@ -201,4 +219,5 @@ void M_HandleVideoModes(INT32 ch)
 				M_ClearMenus(true);
 		}
 	}
+#endif // __3DS__
 }

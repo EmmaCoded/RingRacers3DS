@@ -272,6 +272,14 @@ void P_RemoveMobj(mobj_t *th);
 void P_RemoveSavegameMobj(mobj_t *th);
 boolean P_SetPlayerMobjState(mobj_t *mobj, statenum_t state);
 boolean P_SetMobjState(mobj_t *mobj, statenum_t state);
+#if defined(__3DS__) || defined(RR_PCGEN) // PC: low-end mode
+void RR3DS_RingWake(mobj_t *mobj);      // sleeping ring
+void RR3DS_RingSyncFrame(mobj_t *mobj);
+extern UINT32 rr3ds_ringSlept;
+extern int rr3ds_ringSleepOn;
+extern UINT32 rr3ds_farSlept;
+extern int rr3ds_farSleepOn;
+#endif
 
 void P_RunOverlays(void);
 #define OV_DONTSCREENOFFSET	1

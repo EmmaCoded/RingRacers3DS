@@ -1875,8 +1875,15 @@ extern boolean demosynced;
 // G_Ticker
 // Make ticcmd_ts for the players.
 //
+#ifdef __3DS__
+precise_t rr_t_ptick, rr_t_hu, rr_t_st, rr_t_pre, rr_t_spec, rr_t_inv, rr_t_vote;
+#endif
+
 void G_Ticker(boolean run)
 {
+#ifdef __3DS__
+	const precise_t rr_gstart = I_GetPreciseTime();
+#endif
 	UINT32 i;
 	INT32 buf;
 	ticcmd_t *cmd;
@@ -2029,15 +2036,30 @@ void G_Ticker(boolean run)
 	}
 
 	// do main actions
+#ifdef __3DS__
+	rr_t_pre += I_GetPreciseTime() - rr_gstart;
+#endif
 	switch (gamestate)
 	{
 		case GS_LEVEL:
 			if (demo.attract)
 				F_AttractDemoTicker();
+#ifdef __3DS__
+			{
+				precise_t t0 = I_GetPreciseTime(), t1;
+				P_Ticker(run); // tic the game
+				t1 = I_GetPreciseTime(); rr_t_ptick += t1 - t0;
+				F_TextPromptTicker();
+				AM_Ticker();
+				HU_Ticker();
+				rr_t_hu += I_GetPreciseTime() - t1;
+			}
+#else
 			P_Ticker(run); // tic the game
 			F_TextPromptTicker();
 			AM_Ticker();
 			HU_Ticker();
+#endif
 			break;
 
 		case GS_INTERMISSION:
@@ -2114,13 +2136,23 @@ void G_Ticker(boolean run)
 	{
 		if (gamestate != GS_TITLESCREEN
 		&& G_GamestateUsesLevel() == true)
+#ifdef __3DS__
+			{ precise_t t0 = I_GetPreciseTime(); ST_Ticker(run); rr_t_st += I_GetPreciseTime() - t0; }
+#else
 			ST_Ticker(run);
+#endif
 
 		if (G_GametypeHasSpectators()
 			&& (gamestate == GS_LEVEL || gamestate == GS_INTERMISSION || gamestate == GS_VOTING // definitely good
 			|| gamestate == GS_WAITINGPLAYERS)) // definitely a problem if we don't do it at all in this gamestate, but might need more protection?
 		{
+#ifdef __3DS__
+			precise_t t0 = I_GetPreciseTime();
 			K_CheckSpectateStatus(true);
+			rr_t_spec += I_GetPreciseTime() - t0;
+#else
+			K_CheckSpectateStatus(true);
+#endif
 		}
 
 		if (pausedelay && pausedelay != INT32_MIN)
@@ -2160,9 +2192,17 @@ void G_Ticker(boolean run)
 
 		if (Playing() == true)
 		{
+#ifdef __3DS__
+			precise_t t0 = I_GetPreciseTime(), t1;
+			P_InvincGrowMusic();
+			t1 = I_GetPreciseTime(); rr_t_inv += t1 - t0;
+			K_TickMidVote();
+			rr_t_vote += I_GetPreciseTime() - t1;
+#else
 			P_InvincGrowMusic();
 
 			K_TickMidVote();
+#endif
 		}
 
 		if (g_fast_forward == 0 && demo.attract == DEMO_ATTRACT_CREDITS)

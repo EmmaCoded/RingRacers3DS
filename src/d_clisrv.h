@@ -300,7 +300,17 @@ struct clientconfig_pak
 	UINT8 availabilities[MAXAVAILABILITY];
 	uint8_t challengeResponse[MAXSPLITSCREENPLAYERS][SIGNATURELENGTH];
 	player_config_t player_configs[MAXSPLITSCREENPLAYERS];
+#ifdef RR_PCGEN
+	UINT8 rrlowend; // Ring Racers E: the client uses low-end mode (only read if application == RR_NETAPP)
+#endif
 } ATTRPACK;
+
+#ifdef RR_PCGEN
+// Ring Racers E: free bits of serverinfo.kartvars
+#define SV_RRLOWEND 0x04	// the E server plays in low-end mode
+#define SV_RRE 0x08		// the server is Ring Racers E (application stays "RingRacers" so that the
+				// so the original Ring Racers can request to join and receive the "Ring Racers E only" notice)
+#endif
 
 #define SV_SPEEDMASK 0x03		// used to send kartspeed
 #define SV_DEDICATED 0x40		// server is dedicated
@@ -496,7 +506,11 @@ struct doomdata_t
 #pragma pack()
 #endif
 
+#ifdef __3DS__
+#define MAXSERVERLIST 1 // no online on 3DS (was ~162 KB)
+#else
 #define MAXSERVERLIST (MAXNETNODES-1)
+#endif
 #define GTCALC_RACE 0
 #define GTCALC_BATTLE 1
 #define GTCALC_CUSTOM 2

@@ -10,6 +10,13 @@
 
 #include "i_video.h"
 
+#ifdef __3DS__
+// CPU presentation (dummy/i_video_3ds.c + dummy/twodee_soft_3ds.cpp).
+// On 3DS hwr2/RHI is not used: the 2D is rasterized in software and written
+// straight to the framebuffer. We do not include <3ds.h> here (clash with rhi::Handle).
+#include "dummy/i_3ds.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <vector>
@@ -30,8 +37,11 @@
 // KILL THIS WHEN WE KILL OLD OGL SUPPORT PLEASE
 #include "d_netcmd.h" // kill
 #include "doomstat.h" // kill
+#include "i_system.h" // I_GetPreciseTime, I_OutputMsg ([FRAME])
 #include "s_sound.h"  // kill
-#include "sdl/ogl_sdl.h"
+#if defined(HWRENDER) && !defined(__3DS__)
+#include "sdl/ogl_sdl.h" // SDL-only; its only use (OglSdlFinishUpdate) is already behind #ifdef HWRENDER
+#endif
 #include "st_stuff.h" // kill
 
 // Legacy FinishUpdate Draws
@@ -59,6 +69,11 @@ static bool g_imgui_frame_active = false;
 static HardwareState g_hw_state;
 
 Handle<Rhi> srb2::sys::g_current_rhi = kNullHandle;
+
+void srb2::sys::invalidate_rhi()
+{
+	g_last_known_rhi = nullptr;
+}
 
 static bool rhi_changed(Rhi* rhi)
 {
@@ -167,7 +182,7 @@ static void temp_legacy_finishupdate_draws()
 	ST_drawDebugInfo();
 }
 
-#ifdef HWRENDER
+#if defined(HWRENDER) && !defined(__3DS__)
 static void finish_legacy_ogl_update()
 {
 	temp_legacy_finishupdate_draws();
@@ -202,6 +217,9 @@ HardwareState* sys::main_hardware_state()
 
 void I_CaptureVideoFrame()
 {
+#ifdef __3DS__
+	return; // no video recording on 3DS
+#endif
 	rhi::Rhi* rhi = srb2::sys::get_rhi(srb2::sys::g_current_rhi);
 	hwr2::HardwareState* hw_state = srb2::sys::main_hardware_state();
 
@@ -211,6 +229,9 @@ void I_CaptureVideoFrame()
 
 void I_StartDisplayUpdate(void)
 {
+#ifdef __3DS__
+	return; // nothing to prepare: there is no GPU backbuffer
+#endif
 	if (rendermode == render_none)
 	{
 		return;
@@ -237,14 +258,35 @@ void I_StartDisplayUpdate(void)
 	preframe_update(*rhi);
 }
 
+#ifdef __3DS__
+extern "C" void RR3DS_ValveSprites(void); // z_zone.cpp 
+extern "C" void I_3DS_SdReport(void); // fopen_count_3ds.c 
+#endif
 void I_FinishUpdate(void)
 {
 	ZoneScoped;
+#ifdef __3DS__
+	if (rendermode == render_none)
+	{
+		I_3DS_DiscardTwodee();
+		FrameMark;
+		return;
+	}
+	temp_legacy_finishupdate_draws(); // FPS, ping, captions... (queued in g_2d)
+	I_3DS_FinishFrame();               // 3D + 2D -> framebuffer superior
+	RR3DS_ValveSprites();
+	I_3DS_SdReport();
+	FrameMark;
+	return;
+#else
 	if (rendermode == render_none)
 	{
 		FrameMark;
 		return;
 	}
+#ifdef RR_PCGEN
+	const precise_t rr_fu_in = I_GetPreciseTime(); // [FRAME]: work before present (2D HUD, scaling)
+#endif
 
 	temp_legacy_finishupdate_draws();
 
@@ -315,17 +357,69 @@ void I_FinishUpdate(void)
 
 	postframe_update(*rhi);
 
+#ifdef RR_PCGEN
+	// [FRAME]: roughly once per second to the log: frames, average and WORST frame (ms), how many exceed 33/50 ms and the
+	// worst present+finish time. The [DIB] values are 30-frame averages and hide isolated stalls.
+	static precise_t s_fr_last = 0, s_fr_win = 0;
+	static double s_fr_sum = 0, s_fr_worst = 0, s_fr_wpres = 0, s_fr_pre = 0, s_fr_wpre = 0;
+	static int s_fr_n = 0, s_fr_33 = 0, s_fr_50 = 0;
+	const precise_t s_fr_t0 = I_GetPreciseTime();
+	{
+		const double pre = (double)(s_fr_t0 - rr_fu_in) * 1000.0 / (double)I_GetPrecisePrecision();
+		s_fr_pre += pre;
+		if (pre > s_fr_wpre) s_fr_wpre = pre;
+	}
+#endif
 	rhi->present();
 	rhi->finish();
+#ifdef RR_PCGEN
+	{
+		const precise_t t1 = I_GetPreciseTime();
+		const double ms = 1000.0 / (double)I_GetPrecisePrecision();
+		const double pres = (double)(t1 - s_fr_t0) * ms;
+		if (s_fr_last)
+		{
+			const double ft = (double)(t1 - s_fr_last) * ms;
+			s_fr_sum += ft;
+			s_fr_n++;
+			if (ft > s_fr_worst) s_fr_worst = ft;
+			if (ft > 33.4) s_fr_33++;
+			if (ft > 50.0) s_fr_50++;
+		}
+		if (pres > s_fr_wpres) s_fr_wpres = pres;
+		s_fr_last = t1;
+		if (!s_fr_win) s_fr_win = t1;
+		if ((double)(t1 - s_fr_win) * ms >= 1000.0 && s_fr_n)
+		{
+			I_OutputMsg("[FRAME] %s: %d frames, avg %.1f ms, worst %.1f ms, >33ms=%d >50ms=%d, present worst %.1f ms, before present avg %.1f worst %.1f ms\n",
+				gamestate == GS_LEVEL ? "race" : "menu", s_fr_n, s_fr_sum / s_fr_n, s_fr_worst, s_fr_33, s_fr_50, s_fr_wpres,
+				s_fr_pre / s_fr_n, s_fr_wpre);
+			s_fr_win = t1;
+			s_fr_sum = s_fr_worst = s_fr_wpres = s_fr_pre = s_fr_wpre = 0;
+			s_fr_n = s_fr_33 = s_fr_50 = 0;
+		}
+	}
+#endif
 
 	FrameMark;
 
 	// Immediately prepare to begin drawing the next frame
 	I_StartDisplayUpdate();
+#endif // __3DS__
 }
+
+#ifdef __3DS__
+extern "C" void I_3DS_BeginLegacyGLPass(void); // dummy/i_video.c
+#endif
 
 void VID_BeginLegacyGLRenderPass(void)
 {
+#ifdef __3DS__
+#ifdef HWRENDER
+	I_3DS_BeginLegacyGLPass();
+#endif
+	return;
+#endif
 	if (rendermode == render_none)
 	{
 		return;
@@ -345,6 +439,9 @@ void VID_BeginLegacyGLRenderPass(void)
 
 void VID_EndLegacyGLRenderPass(void)
 {
+#ifdef __3DS__
+	return;
+#endif
 	if (rendermode == render_none)
 	{
 		return;

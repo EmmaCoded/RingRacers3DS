@@ -63,6 +63,10 @@ struct thinker_t
 	INT32 references;
 	INT32 alloctype;
 	size_t size;
+#if defined(__3DS__) || defined(RR_PCGEN) // PC: low-end mode
+	// "sleeping" idle ring mobj: P_RunThinkers skips it (see RR3DS_RingWake, p_mobj.c)
+	UINT8 rr3ds_sleep;
+#endif
 
 #ifdef PARANOIA
 	INT32 debug_mobjtype;

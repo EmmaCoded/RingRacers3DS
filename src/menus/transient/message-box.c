@@ -13,6 +13,7 @@
 #include "../../k_menu.h"
 #include "../../v_video.h" // V_ScaledWordWrap, HU_FONT
 #include "../../z_zone.h"
+#include "../../rr_nete.h" // Ring Racers E: IP banner
 
 // message prompt struct
 struct menumessage_s menumessage;
@@ -189,6 +190,13 @@ void M_HandleMenuMessage(void)
 		}
 		default:
 		{
+#ifdef RR_PCGEN
+			// the IP banner (opened with Y) is also closed with Y
+			if (rrnet_ipmsg_open && M_MenuButtonPressed(pid, MBT_Y))
+				btnok = true;
+			if (btok || btnok)
+				rrnet_ipmsg_open = 0;
+#endif
 			if (btok || btnok)
 				M_StopMessage(MA_NONE);
 

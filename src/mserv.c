@@ -479,7 +479,11 @@ char *GetMasterServerRules(void)
 static boolean
 Online (void)
 {
+#ifdef RR_PCGEN // Ring Racers E: never listed on the official server browser
+	return false;
+#else
 	return ( serverrunning && netgame && cv_advertise.value );
+#endif
 }
 
 static inline void SendPingToMasterServer(void)
@@ -590,8 +594,18 @@ void Advertise_OnChange(void)
 {
 	int different;
 
+#ifdef RR_PCGEN // Ring Racers E: never listed on the official server browser
 	if (cv_advertise.value)
 	{
+		CV_StealthSetValue(&cv_advertise, 0);
+		CONS_Printf("Ring Racers E servers can't be public. Use Direct Join.\n");
+		return;
+	}
+#endif
+
+	if (cv_advertise.value)
+	{
+#ifdef MASTERSERVER // 3DS without curl -> no master server
 		if (serverrunning && netgame)
 		{
 			Lock_state();
@@ -605,6 +619,9 @@ void Advertise_OnChange(void)
 				RegisterServer();
 			}
 		}
+#else
+		(void)different;
+#endif
 	}
 	else
 	{
@@ -617,3 +634,11 @@ void Advertise_OnChange(void)
 
 	M_PopupMasterServerRules();
 }
+
+#ifndef MASTERSERVER
+// 3DS without curl -> no master server. Empty functions so it links.
+void RegisterServer(void) {}
+void UnregisterServer(void) {}
+void Get_rules(void) {}
+void MasterClient_Ticker(void) {}
+#endif
